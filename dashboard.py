@@ -29,7 +29,9 @@ SERIES_META: dict[str, tuple[str, str, str, bool, str]] = {
     "load":                 ("Load",                 "MWmed", "Balance", True, ""),
     "production_total":     ("Production total",     "MWmed", "Balance", True, ""),
     "gen_hydro":            ("Hydro generation",     "MWmed", "Balance", True, ""),
-    "gen_thermal":          ("Thermal generation",   "MWmed", "Balance", True, ""),
+    "gen_gas":              ("Gas generation",       "MWmed", "Balance", True, ""),
+    "thermal_nongas":       ("Thermal \u2014 non-gas", "MWmed", "Balance", True, ""),
+    "gen_thermal":          ("Thermal generation (total)", "MWmed", "Balance", True, ""),
     "gen_wind":             ("Wind generation",      "MWmed", "Balance", True, ""),
     "gen_solar":            ("Solar generation",     "MWmed", "Balance", True, ""),
     "net_interchange":      ("Net interchange",      "MWmed", "Balance", True, ""),
@@ -98,6 +100,38 @@ def add_sin(df: pd.DataFrame) -> pd.DataFrame:
                      ignore_index=True)
 
 
+def add_derived(df: pd.DataFrame) -> pd.DataFrame:
+    """Derive gas-centric convenience series for the Balance group.
+
+    ``gen_gas`` mirrors ``thermal_gas`` (same values, promoted to sit beside
+    hydro/wind/solar since gas-fired dispatch is the primary lens this tool
+    serves). ``thermal_nongas`` is the rest of the thermal fleet
+    (coal/oil/nuclear/biomass/other), so hydro + gas + thermal_nongas + wind
+    + solar still reconciles to production_total. Runs after add_sin so the
+    national SIN row gets these too.
+    """
+    sub = df[df["entity"] == ""]
+    wide = sub.pivot_table(index=["date", "subsystem"], columns="series",
+                           values="value", aggfunc="mean")
+    extra = []
+    if "thermal_gas" in wide.columns:
+        gas = wide["thermal_gas"].rename("value").reset_index()
+        gas["series"] = "gen_gas"
+        extra.append(gas)
+        if "gen_thermal" in wide.columns:
+            nongas = (wide["gen_thermal"] - wide["thermal_gas"]).clip(lower=0)
+            nongas = nongas.rename("value").reset_index()
+            nongas["series"] = "thermal_nongas"
+            extra.append(nongas)
+    if not extra:
+        return df
+    add = pd.concat(extra, ignore_index=True)
+    add["entity"] = ""
+    add = add.dropna(subset=["value"])
+    return pd.concat([df, add[["date", "subsystem", "entity", "series", "value"]]],
+                     ignore_index=True)
+
+
 def pick_defaults(df: pd.DataFrame, ent: pd.DataFrame) -> dict:
     """Opening selections: the biggest gas plants, one reservoir per subsystem.
 
@@ -133,6 +167,7 @@ def build_payload(df: pd.DataFrame, ent: pd.DataFrame) -> dict:
     df["date"] = pd.to_datetime(df["date"]).dt.normalize()
     df["entity"] = df["entity"].fillna("").astype(str)
     df = add_sin(df)
+    df = add_derived(df)
 
     dates = sorted(df["date"].unique())
     idx = {d: i for i, d in enumerate(dates)}
@@ -189,6 +224,7 @@ TEMPLATE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ONS Balances</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232a78d6'/%3E%3Cpath d='M3 11.5 6 7l3 2.5L13 4' stroke='white' stroke-width='1.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="https://use.typekit.net/xgf3jlp.css">
 <style>
 :root{
   color-scheme: light;
@@ -212,7 +248,7 @@ TEMPLATE = r"""<!doctype html>
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--plane);color:var(--text-1);
-  font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;}
+  font:14px/1.5 "motiva-sans","Motiva Sans","Motiva Sans W01",system-ui,-apple-system,"Segoe UI",sans-serif;}
 .wrap{max-width:1440px;margin:0 auto;padding:20px 20px 64px}
 header{display:flex;flex-wrap:wrap;gap:12px;align-items:baseline;
   justify-content:space-between;margin-bottom:14px}
@@ -257,9 +293,16 @@ button[aria-pressed=true]{background:var(--accent);border-color:var(--accent);co
   padding:11px 13px}
 .tile .nm{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text-2);
   margin-bottom:4px}
-.tile .big{font-size:22px;font-weight:600;letter-spacing:-.02em}
+.tile .big{font-size:22px;font-weight:600;letter-spacing:-.02em;
+  overflow-wrap:anywhere}
 .tile .meta{font-size:11.5px;color:var(--muted);margin-top:3px;
   font-variant-numeric:tabular-nums}
+.mix-bar{display:flex;height:14px;border-radius:4px;overflow:hidden;
+  margin-top:7px;background:var(--grid)}
+.mix-bar>div{min-width:2px}
+.mix-legend{display:flex;flex-wrap:wrap;gap:5px 14px;margin-top:8px;
+  font-size:11.5px;color:var(--text-2)}
+.mix-legend span{display:flex;align-items:center;gap:5px;white-space:nowrap}
 .panel-title{font-size:13px;font-weight:600;margin:0 0 2px}
 .panel-note{font-size:11.5px;color:var(--muted);margin:0 0 8px}
 .legend{display:flex;flex-wrap:wrap;gap:6px 16px;margin-top:8px;font-size:12px;
@@ -305,6 +348,8 @@ table.data thead th{position:sticky;top:0;background:var(--surface-1);
 
 <div class="tabs" id="tabs"></div>
 
+<div class="tiles" id="kpiTiles" style="margin-bottom:14px"></div>
+
 <div class="card">
   <div class="controls">
     <div class="ctl"><label>Date range</label><div class="row" id="presets"></div></div>
@@ -349,7 +394,7 @@ const VIEWS = [
 
 const state = {
   view: "subsystems",
-  from: null, to: null, smooth: 7,
+  from: null, to: null, smooth: 1,
   subs: new Set(["SIN"]),
   table: false,
   slots: {subsystems:new Map(), plants:new Map(), reservoirs:new Map()},
@@ -942,7 +987,126 @@ function renderCount(){
   if(c) c.textContent=picked().length+" series selected · "
     +windowDates().length+" days";
 }
-function render(){ renderTiles(); renderCharts(); renderTable(); }
+
+/* ---------- KPI strip: latest-data snapshot, gas-market lens ------------- */
+function mixColor(which){
+  const pal = isDark()?DATA.paletteDark:DATA.paletteLight;
+  return {hydro:pal[2], gas:pal[1], wind:pal[0], solar:pal[3]}[which]
+    || "var(--muted)";
+}
+function kpiTile(label,big,unit,meta,color){
+  const t=el("div","tile");
+  t.innerHTML='<div class="nm">'+(color?'<span class="sw" style="background:'+
+      color+';border-color:'+color+'"></span>':'')+label+'</div>'+
+    '<div class="big">'+big+(unit?' <span style="font-size:12px;'+
+      'color:var(--text-2);font-weight:400">'+unit+'</span>':'')+'</div>'+
+    (meta?'<div class="meta">'+meta+'</div>':'');
+  return t;
+}
+function renderKpis(){
+  const host=document.getElementById("kpiTiles");
+  if(!host) return;
+  if(state.view!=="subsystems"){ host.hidden=true; host.innerHTML=""; return; }
+  host.hidden=false; host.innerHTML="";
+
+  const dates=DATA.dates;
+  const seriesArr=(m,s="SIN")=>DATA.series[skey(m,s)]||[];
+  const lastIdx=arr=>{ for(let i=arr.length-1;i>=0;i--) if(arr[i]!=null) return i;
+    return -1; };
+  const asOf=lastIdx(seriesArr("load"));
+  if(asOf<0) return;
+  const asOfDate=dates[asOf];
+  const valAt=(m,s="SIN",i=asOf)=>{ const a=seriesArr(m,s); return a[i]==null?null:a[i]; };
+  const rangeAvg=(m,s,i0,i1)=>{
+    const a=seriesArr(m,s); let sum=0,n=0;
+    for(let i=Math.max(0,i0);i<=i1;i++) if(a[i]!=null){sum+=a[i];n++;}
+    return n?sum/n:null;
+  };
+
+  const loadV=valAt("load"), hydV=valAt("gen_hydro"), gasV=valAt("gen_gas"),
+    nonGasV=valAt("thermal_nongas"), windV=valAt("gen_wind"), solV=valAt("gen_solar"),
+    earV=valAt("ear_pct"), cmoV=valAt("cmo");
+  let prodV=valAt("production_total");
+  if(prodV==null){
+    const parts=[hydV,gasV,nonGasV,windV,solV].filter(v=>v!=null);
+    prodV=parts.length?parts.reduce((a,b)=>a+b,0):null;
+  }
+
+  const gasAvg7=rangeAvg("gen_gas","SIN",asOf-6,asOf);
+  const gasAvgPrev7=rangeAvg("gen_gas","SIN",asOf-13,asOf-7);
+  const gasTrend=(gasAvg7!=null&&gasAvgPrev7!=null&&Math.abs(gasAvgPrev7)>1e-9)
+    ? 100*(gasAvg7-gasAvgPrev7)/Math.abs(gasAvgPrev7) : null;
+
+  const earPrior=valAt("ear_pct","SIN",Math.max(0,asOf-30));
+  const earChg=(earV!=null&&earPrior!=null) ? earV-earPrior : null;
+
+  const lagDays=dates.length-1-asOf;
+
+  let maxSub=null,maxVal=-Infinity,minSub=null,minVal=Infinity;
+  DATA.subsystems.filter(s=>s!=="SIN").forEach(s=>{
+    const v=valAt("net_interchange",s);
+    if(v==null) return;
+    if(v>maxVal){maxVal=v;maxSub=s;}
+    if(v<minVal){minVal=v;minSub=s;}
+  });
+  // positive net_interchange = net exporter (matches the bulletin convention).
+  // Show whichever extreme is the more informative regional imbalance: a true
+  // exporter if one exists, otherwise the biggest net importer.
+  let flowLabel=null,flowSub=null,flowVal=null;
+  if(maxSub!=null && maxVal>0){ flowLabel="Largest net exporter"; flowSub=maxSub; flowVal=maxVal; }
+  else if(minSub!=null){ flowLabel="Largest net importer"; flowSub=minSub; flowVal=-minVal; }
+
+  host.appendChild(kpiTile("Latest available data", asOfDate, "",
+    lagDays>0
+      ? lagDays+" day"+(lagDays===1?"":"s")+" behind the most recent date in "+
+        "the store — ONS revises recent days after publication"
+      : "current through the newest published bulletin"));
+
+  host.appendChild(kpiTile("SIN load", fmtNum(loadV,0), "MWmed",
+    "national balance · "+asOfDate));
+
+  if(gasV!=null){
+    host.appendChild(kpiTile("Gas-fired generation", fmtNum(gasV,0), "MWmed",
+      (prodV?(100*gasV/Math.max(prodV,1)).toFixed(1)+"% of total generation":"")+
+      (gasTrend==null?"":" · "+(gasTrend>=0?"+":"")+gasTrend.toFixed(1)+"% vs prior 7d"),
+      mixColor("gas")));
+  }
+  if(earV!=null){
+    host.appendChild(kpiTile("Hydro reservoirs (EAR)", fmtNum(earV,1), "%",
+      "national stored energy"+(earChg==null?"":" · "+(earChg>=0?"+":"")+
+        earChg.toFixed(1)+"pt vs 30d ago")+" — low reservoirs push more gas "+
+        "dispatch", mixColor("hydro")));
+  }
+  if(cmoV!=null){
+    host.appendChild(kpiTile("CMO (spot price)", fmtNum(cmoV,0), "R$/MWh",
+      "national average · "+asOfDate));
+  }
+  if(flowSub){
+    host.appendChild(kpiTile(flowLabel, flowSub, "",
+      (DATA.subsystemLabels[flowSub]||flowSub)+" · "+fmtNum(flowVal,0)+
+      " MWmed · "+asOfDate));
+  }
+
+  if(prodV){
+    const mix=[["Hydro",hydV,mixColor("hydro")],["Gas",gasV,mixColor("gas")],
+      ["Other thermal",nonGasV,mixColor()],["Wind",windV,mixColor("wind")],
+      ["Solar",solV,mixColor("solar")]].filter(m=>m[1]!=null && m[1]>0);
+    if(mix.length){
+      const wide=el("div","tile"); wide.style.gridColumn="1 / -1";
+      let h='<div class="nm">Load met by generation source · '+asOfDate+'</div>';
+      h+='<div class="mix-bar">'+mix.map(([nm,v,c])=>
+        '<div style="flex:'+Math.max(v,0)+';background:'+c+'" title="'+nm+' '+
+          fmtNum(v,0)+' MWmed"></div>').join("")+'</div>';
+      h+='<div class="mix-legend">'+mix.map(([nm,v,c])=>
+        '<span><span class="sw" style="background:'+c+';border-color:'+c+
+          '"></span>'+nm+' '+(100*v/prodV).toFixed(0)+'%</span>').join("")+'</div>';
+      wide.innerHTML=h;
+      host.appendChild(wide);
+    }
+  }
+}
+
+function render(){ renderKpis(); renderTiles(); renderCharts(); renderTable(); }
 
 /* ---------- boot ----------------------------------------------------------- */
 async function unpack(){
@@ -1001,8 +1165,9 @@ async function boot(){
     clearTimeout(rz); rz=setTimeout(renderCharts,140);
   });
 
-  // opening selections
-  ["load","gen_thermal","thermal_gas","ear_pct"].forEach(m=>{
+  // opening selections -- gas generation front and center, hydro (the swing
+  // factor for gas dispatch) and reservoir level alongside it
+  ["load","gen_gas","gen_hydro","ear_pct"].forEach(m=>{
     const k=skey(m,"SIN");
     if(exists(k)){
       claimSlot(k, "subsystems"); state.picked.subsystems.push(k);
