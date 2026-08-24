@@ -247,8 +247,11 @@ button[aria-pressed=true]{background:var(--accent);border-color:var(--accent);co
   white-space:nowrap}
 .sw{width:9px;height:9px;border-radius:2px;flex:none;background:transparent;
   border:1px solid transparent}
-.entlist{max-height:270px;overflow-y:auto;border:1px solid var(--ring);
-  border-radius:8px;padding:8px 10px;margin-top:8px}
+.entlist{max-height:460px;overflow:auto;border:1px solid var(--ring);
+  border-radius:8px;padding:0;margin-top:8px}
+.entlist table.data{font-size:12px}
+.entlist table.data th,.entlist table.data td{padding:5px 8px}
+.entlist th.l,.entlist td.l{text-align:left}
 .tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px}
 .tile{background:var(--surface-1);border:1px solid var(--ring);border-radius:10px;
   padding:11px 13px}
@@ -308,7 +311,7 @@ table.data thead th{position:sticky;top:0;background:var(--surface-1);
     <div class="ctl"><label>From</label><input type="date" id="from"></div>
     <div class="ctl"><label>To</label><input type="date" id="to"></div>
     <div class="ctl"><label>Smoothing</label><div class="row" id="smooth"></div></div>
-    <div class="ctl"><label>Subsystems</label><div class="row" id="subs"></div></div>
+    <div class="ctl" id="subsCtl"><label>Subsystems</label><div class="row" id="subs"></div></div>
     <div class="ctl"><label>View</label>
       <div class="row"><button id="tableBtn" aria-pressed="false">Table</button></div>
     </div>
@@ -332,7 +335,8 @@ table.data thead th{position:sticky;top:0;background:var(--surface-1);
 <script type="application/octet-stream" id="payload">__PAYLOAD__</script>
 <script>
 let DATA = null;
-const MAX_SERIES = 8;
+const PALETTE_SIZE = 8;   // colour palette length -- selection itself is unlimited
+const CHART_MAX = 40;     // beyond this many picks, charts/tiles defer to the table
 const fmtNum = (v, d=0) => v==null||!isFinite(v) ? "–"
   : v.toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
 
@@ -352,7 +356,7 @@ const state = {
   picked: {subsystems:[], plants:[], reservoirs:[]},
   metrics: {plants:new Set(["plant_verif"]), reservoirs:new Set(["res_volutil_pct"])},
   ents:    {plants:[], reservoirs:[]},      // selected entity names
-  filter:  {plants:{group:"", q:""}, reservoirs:{group:"", q:""}},
+  filter:  {plants:{region:"", group:"", q:""}, reservoirs:{region:"", group:"", q:""}},
 };
 const view = () => VIEWS.find(v=>v.id===state.view);
 const picked = () => state.picked[state.view];
@@ -362,9 +366,9 @@ function slotMap(v){ return state.slots[v || state.view]; }
 function claimSlot(key, v){
   const M=slotMap(v);
   if (M.has(key)) return M.get(key);
-  const used = new Set(M.values());
-  for (let i=0;i<MAX_SERIES;i++) if(!used.has(i)){ M.set(key,i); return i; }
-  M.set(key,0); return 0;
+  const slot = M.size % PALETTE_SIZE;
+  M.set(key, slot);
+  return slot;
 }
 const releaseSlot = (k, v) => slotMap(v).delete(k);
 function isDark(){
@@ -455,8 +459,8 @@ function buildTabs(){
   VIEWS.forEach(v=>{
     const b=el("button",null,v.label);
     b.setAttribute("aria-pressed",String(state.view===v.id));
-    b.onclick=()=>{ state.view=v.id; buildTabs(); buildSubs(); buildPickCard();
-      render(); };
+    b.onclick=()=>{ state.view=v.id; buildTabs(); buildSubs(); updateSubsVisibility();
+      buildPickCard(); render(); };
     host.appendChild(b);
   });
 }
@@ -496,13 +500,17 @@ function buildSubs(){
     host.appendChild(b);
   });
 }
+function updateSubsVisibility(){
+  const host=document.getElementById("subsCtl");
+  if(host) host.style.display = view().kind ? "none" : "";
+}
 function dropOutOfScope(){
-  VIEWS.forEach(v=>{
-    state.picked[v.id]=state.picked[v.id].filter(k=>{
-      const keep=state.subs.has(k.split("|")[1]);
-      if(!keep) releaseSlot(k, v.id);
-      return keep;
-    });
+  // the Subsystems row now only scopes the "subsystems" balance view -- plants
+  // and reservoirs are scoped by their own Region dropdown instead.
+  state.picked.subsystems = state.picked.subsystems.filter(k=>{
+    const keep=state.subs.has(k.split("|")[1]);
+    if(!keep) releaseSlot(k, "subsystems");
+    return keep;
   });
 }
 function syncInputs(){
@@ -513,7 +521,7 @@ function syncInputs(){
 /* ---------- pick card: metric grid (subsystems) or entity list ------------- */
 function toggleKey(k, on){
   const list=picked(), i=list.indexOf(k);
-  if(on && i<0 && list.length<MAX_SERIES){ claimSlot(k); list.push(k); }
+  if(on && i<0){ claimSlot(k); list.push(k); }
   else if(!on && i>=0){ list.splice(i,1); releaseSlot(k); }
 }
 function buildPickCard(){
@@ -540,13 +548,8 @@ function buildMetricPicker(card){
       const keys=[...state.subs].map(s=>skey(m,s)).filter(exists);
       if(!keys.length) return;
       const on=keys.every(k=>picked().includes(k));
-      const room=picked().length + keys.filter(k=>!picked().includes(k)).length;
       const lab=el("label","opt");
       const cb=document.createElement("input"); cb.type="checkbox"; cb.checked=on;
-      if(!on && room>MAX_SERIES){
-        cb.disabled=true; lab.className="opt disabled";
-        lab.title="Limit of "+MAX_SERIES+" series — deselect one first";
-      }
       cb.onchange=()=>{ keys.forEach(k=>toggleKey(k,cb.checked));
         buildPickCard(); render(); };
       const sw=el("span","sw");
@@ -564,7 +567,7 @@ function entityRows(){
   const f=state.filter[state.view];
   const chosen=new Set(picked().map(k=>{const a=k.split("|");return a[1]+"|"+a[2];}));
   return DATA.entities.filter(e=>e.kind===kind)
-    .filter(e=>state.subs.has(e.subsystem))
+    .filter(e=>!f.region || e.subsystem===f.region)
     .filter(e=>!f.group || e.group===f.group)
     .filter(e=>!f.q || e.entity.toLowerCase().includes(f.q.toLowerCase()))
     .sort((a,b)=>{
@@ -595,6 +598,16 @@ function buildEntityPicker(card){
   });
   mBox.appendChild(mRow); bar.appendChild(mBox);
 
+  const regions=DATA.subsystems.filter(s=>s!=="SIN");
+  const rBox=el("div","ctl");
+  rBox.appendChild(el("label",null,"Region"));
+  const rsel=document.createElement("select");
+  rsel.appendChild(new Option("All regions",""));
+  regions.forEach(s=>rsel.appendChild(new Option(DATA.subsystemLabels[s], s)));
+  rsel.value=f.region;
+  rsel.onchange=()=>{ f.region=rsel.value; renderEntityList(); renderCount(); };
+  rBox.appendChild(rsel); bar.appendChild(rBox);
+
   const groups=[...new Set(DATA.entities.filter(e=>e.kind===kind)
     .map(e=>e.group).filter(Boolean))].sort();
   if(groups.length){
@@ -604,7 +617,7 @@ function buildEntityPicker(card){
     sel.appendChild(new Option(kind==="plant"?"All fuels":"All basins",""));
     groups.forEach(g=>sel.appendChild(new Option(g,g)));
     sel.value=f.group;
-    sel.onchange=()=>{ f.group=sel.value; buildPickCard(); };
+    sel.onchange=()=>{ f.group=sel.value; renderEntityList(); renderCount(); };
     gBox.appendChild(sel); bar.appendChild(gBox);
   }
 
@@ -613,42 +626,72 @@ function buildEntityPicker(card){
   const q=document.createElement("input");
   q.type="search"; q.placeholder=kind==="plant"?"plant name":"reservoir name";
   q.value=f.q;
-  q.oninput=()=>{ f.q=q.value; renderEntityList(); };
+  q.oninput=()=>{ f.q=q.value; renderEntityList(); renderCount(); };
   qBox.appendChild(q); bar.appendChild(qBox);
   card.appendChild(bar);
 
+  const filtered = f.region || f.group || f.q;
+  const selRow=el("div","row"); selRow.style.margin="10px 0 2px";
+  const allBtn=el("button",null,"Select all"+(filtered?" (filtered)":""));
+  allBtn.onclick=()=>{ setFilteredSelection(true); };
+  const noneBtn=el("button",null,"Deselect all"+(filtered?" (filtered)":""));
+  noneBtn.onclick=()=>{ setFilteredSelection(false); };
+  selRow.append(allBtn,noneBtn); card.appendChild(selRow);
+
   const list=el("div","entlist"); list.id="entlist"; card.appendChild(list);
   renderEntityList();
+}
+function setFilteredSelection(on){
+  const mset=[...state.metrics[state.view]];
+  entityRows().forEach(e=>{
+    const keys=mset.map(m=>skey(m,e.subsystem,e.entity)).filter(exists);
+    keys.forEach(k=>toggleKey(k,on));
+  });
+  buildPickCard(); render();
 }
 function renderEntityList(){
   const host=document.getElementById("entlist"); if(!host) return;
   host.innerHTML="";
   const rows=entityRows();
   if(!rows.length){ host.appendChild(el("div","empty","No matches.")); return; }
+  const kind=view().kind;
   const mset=[...state.metrics[state.view]];
+  const table=document.createElement("table"); table.className="data";
+  const thead=document.createElement("thead");
+  const htr=document.createElement("tr");
+  htr.appendChild(el("th"));
+  ["Name","Region",kind==="plant"?"Fuel":"Basin"].forEach(t=>htr.appendChild(el("th","l",t)));
+  mset.forEach(m=>htr.appendChild(el("th",null,DATA.seriesMeta[m].label)));
+  thead.appendChild(htr); table.appendChild(thead);
+  const tbody=document.createElement("tbody");
   rows.forEach(e=>{
     const keys=mset.map(m=>skey(m,e.subsystem,e.entity)).filter(exists);
     if(!keys.length) return;
     const on=keys.every(k=>picked().includes(k));
-    const room=picked().length + keys.filter(k=>!picked().includes(k)).length;
-    const lab=el("label","opt");
-    const cb=document.createElement("input"); cb.type="checkbox"; cb.checked=on;
-    if(!on && room>MAX_SERIES){
-      cb.disabled=true; lab.className="opt disabled";
-      lab.title="Limit of "+MAX_SERIES+" series — deselect one first";
-    }
-    cb.onchange=()=>{
-      if(cb.checked && picked().length + keys.filter(k=>!picked().includes(k)).length
-         > MAX_SERIES) { cb.checked=false; return; }
-      keys.forEach(k=>toggleKey(k,cb.checked));
+    const tr=document.createElement("tr");
+    const tdCb=el("td"); const cb=document.createElement("input");
+    cb.type="checkbox"; cb.checked=on;
+    cb.onchange=()=>{ keys.forEach(k=>toggleKey(k,cb.checked));
       renderEntityList(); renderCount(); render(); };
-    const sw=el("span","sw");
+    tdCb.appendChild(cb); tr.appendChild(tdCb);
+    const tdName=el("td","l");
+    const sw=el("span","sw"); sw.style.display="inline-block"; sw.style.marginRight="6px";
     const first=keys.find(k=>picked().includes(k));
     if(first){ sw.style.background=colorOf(first); sw.style.borderColor=colorOf(first); }
-    lab.append(cb,sw,document.createTextNode(e.entity));
-    lab.appendChild(el("span","grp", e.subsystem + (e.group? " · "+e.group : "")));
-    host.appendChild(lab);
+    tdName.appendChild(sw); tdName.appendChild(document.createTextNode(e.entity));
+    tr.appendChild(tdName);
+    tr.appendChild(el("td","l",DATA.subsystemLabels[e.subsystem]||e.subsystem));
+    tr.appendChild(el("td","l",e.group||"—"));
+    mset.forEach(m=>{
+      const k=skey(m,e.subsystem,e.entity);
+      const vals=fullSeries(k);
+      let last=null; for(let i=vals.length-1;i>=0;i--) if(vals[i]!=null){last=vals[i];break;}
+      tr.appendChild(el("td",null,fmtNum(last,decOf(k))));
+    });
+    tbody.appendChild(tr);
   });
+  table.appendChild(tbody);
+  host.appendChild(table);
 }
 function syncEntitySelection(){
   // when the metric toggles change, rebuild the picked list from the same entities
@@ -662,7 +705,7 @@ function syncEntitySelection(){
   const list=[];
   ents.forEach(e=>{
     const keys=mset.map(m=>skey(m,e.subsystem,e.entity)).filter(exists);
-    if(!keys.length || list.length+keys.length>MAX_SERIES) return;  // whole set or none
+    if(!keys.length) return;  // whole set or none
     keys.forEach(k=>{ claimSlot(k); list.push(k); });
   });
   state.picked[state.view]=list;
@@ -672,6 +715,13 @@ function syncEntitySelection(){
 const decOf = k => ["%","R$/MWh","m"].includes(unitOf(k)) ? 1 : 0;
 function renderTiles(){
   const host=document.getElementById("tiles"); host.innerHTML="";
+  if(picked().length>CHART_MAX){
+    host.innerHTML='<div class="card empty">'+picked().length+
+      ' series selected — stat tiles are hidden above '+CHART_MAX+
+      '. Switch on Table to see them all.</div>';
+    renderCount();
+    return;
+  }
   picked().forEach(k=>{
     const v=seriesValues(k).filter(x=>x!=null);
     const t=el("div","tile"), unit=unitOf(k), dec=decOf(k);
@@ -844,6 +894,12 @@ function renderCharts(){
                   : "Pick one or more series above.")+'</div>';
     return;
   }
+  if(picked().length>CHART_MAX){
+    host.innerHTML='<div class="card empty">'+picked().length+
+      ' series selected — too many to chart clearly. Switch on Table below, '+
+      'or narrow your Region/Fuel/search filters.</div>';
+    return;
+  }
   const W=Math.max(680, host.clientWidth-34);
   DATA.unitPanels.forEach(p=>{
     const keys=picked().filter(k=>unitOf(k)===p.unit);
@@ -883,7 +939,7 @@ function downloadCSV(){
 
 function renderCount(){
   const c=document.getElementById("count");
-  if(c) c.textContent=picked().length+" of "+MAX_SERIES+" series · "
+  if(c) c.textContent=picked().length+" series selected · "
     +windowDates().length+" days";
 }
 function render(){ renderTiles(); renderCharts(); renderTable(); }
@@ -948,7 +1004,7 @@ async function boot(){
   // opening selections
   ["load","gen_thermal","thermal_gas","ear_pct"].forEach(m=>{
     const k=skey(m,"SIN");
-    if(exists(k) && state.picked.subsystems.length<MAX_SERIES){
+    if(exists(k)){
       claimSlot(k, "subsystems"); state.picked.subsystems.push(k);
     }
   });
@@ -958,9 +1014,8 @@ async function boot(){
       const id=r.subsystem+"|"+r.entity;
       if(seen.has(id)) return;
       seen.add(id);
-      state.subs.add(r.subsystem);
       const k=skey(metric,r.subsystem,r.entity);
-      if(exists(k) && state.picked[viewId].length<MAX_SERIES){
+      if(exists(k)){
         claimSlot(k, viewId); state.picked[viewId].push(k);
       }
     });
@@ -968,8 +1023,8 @@ async function boot(){
   seedEnts("plants","plant_verif",DATA.defaults.plant);
   seedEnts("reservoirs","res_volutil_pct",DATA.defaults.reservoir);
 
-  buildTabs(); buildPresets(); buildSmooth(); buildSubs(); syncInputs();
-  buildPickCard(); render();
+  buildTabs(); buildPresets(); buildSmooth(); buildSubs(); updateSubsVisibility();
+  syncInputs(); buildPickCard(); render();
 }
 boot();
 </script>
