@@ -1,4 +1,8 @@
-pandas>=2.0
-openpyxl>=3.1
-pyarrow>=14.0
-requests>=2.31
+# Upper bounds are deliberate. The previous `pandas>=2.0` let CI pick up
+# pandas 3.0 (released 2026-01-21) on a routine run, which makes every text
+# metric column a `str` dtype and turns groupby().mean() into a hard
+# TypeError -- a build that breaks with no commit behind it.
+pandas>=3.0,<3.1
+pyarrow>=21.0,<26
+openpyxl>=3.1,<3.2
+requests>=2.31,<3

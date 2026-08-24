@@ -42,6 +42,7 @@ import datetime as dt
 import io
 import json
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -229,6 +230,9 @@ def fetch_source(src: Source, y0: int, y1: int, raw: Path, force: bool) -> list[
 # --------------------------------------------------------------------------
 
 
+_NUM_TOKEN = re.compile(r"\d[\d.,]*\d")
+
+
 def sniff_csv(path: Path) -> dict:
     """ONS has shipped both ';' and ',' delimited CSVs over the years."""
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
@@ -238,11 +242,30 @@ def sniff_csv(path: Path) -> dict:
         sep = dialect.delimiter
     except csv.Error:
         sep = ";" if head.count(";") > head.count(",") else ","
-    first_line = head.splitlines()[0] if head else ""
-    # Decimal comma only if the delimiter is not itself a comma.
-    body = head.splitlines()[1] if len(head.splitlines()) > 1 else ""
-    decimal = "," if (sep == ";" and body.count(",") > body.count(".")) else "."
-    return {"sep": sep, "decimal": decimal, "header_line": first_line}
+    lines = head.splitlines()
+    first_line = lines[0] if lines else ""
+    # Decimal comma only if the delimiter is not itself a comma. Judge on a
+    # block of rows rather than one sample row, and decide by which separator
+    # comes LAST inside a number: in 12.345,60 both a dot and a comma sit
+    # between digits, so counting them alone ties and picks wrong.
+    decimal = "."
+    if sep == ";":
+        comma_last = dot_last = 0
+        for tok in _NUM_TOKEN.findall("\n".join(lines[1:41])):
+            seps = [c for c in tok if c in ".,"]
+            if not seps:
+                continue
+            if seps[-1] == ",":
+                comma_last += 1
+            else:
+                dot_last += 1
+        if comma_last > dot_last:
+            decimal = ","
+    # pt-BR files pair a decimal comma with a '.' thousands separator; pandas
+    # needs both or '12.345,60' silently stays text
+    thousands = "." if decimal == "," else None
+    return {"sep": sep, "decimal": decimal, "thousands": thousands,
+            "header_line": first_line}
 
 
 def read_table(path: Path, columns: list[str] | None = None) -> pd.DataFrame:
@@ -253,6 +276,7 @@ def read_table(path: Path, columns: list[str] | None = None) -> pd.DataFrame:
         path,
         sep=opts["sep"],
         decimal=opts["decimal"],
+        thousands=opts["thousands"],
         encoding="utf-8",
         low_memory=False,
     )
@@ -270,6 +294,70 @@ def read_table(path: Path, columns: list[str] | None = None) -> pd.DataFrame:
 def norm_columns(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [str(c).strip().lower() for c in df.columns]
     return df
+
+
+# --------------------------------------------------------------------------
+# Type coercion
+#
+# ONS metric columns arrive as text often enough that it has to be handled
+# rather than assumed away: a decimal comma the sniffer missed, a sentinel
+# like '-' or 'ND' in one row, a thousands separator, or a parquet resource
+# where the publisher typed the column as string. Since pandas 3.0 (Jan 2026)
+# such a column lands as `str` dtype and .mean() raises outright, so coerce
+# every metric before it reaches a groupby -- and say so loudly when values
+# are lost, because that means the source format moved.
+# --------------------------------------------------------------------------
+
+_NULLISH = {"", "-", "--", "nd", "n/d", "na", "n/a", "null", "none", "nan", "s/i"}
+
+
+def to_number(s: pd.Series) -> pd.Series:
+    """Parse a possibly-text column into floats, tolerating pt-BR formatting."""
+    if pd.api.types.is_numeric_dtype(s):
+        return s
+    t = s.astype("string").str.strip()
+    t = t.mask(t.str.lower().isin(_NULLISH))
+    # Literal characters, not \s / \uXXXX: on pandas 3 these columns are Arrow
+    # backed and RE2 rejects \u escapes.
+    t = t.str.replace("[ \t\r\n\u00a0]", "", regex=True)
+    # 1.234,56 -> 1234.56 ; a bare '1234,56' -> '1234.56' ; '1234.56' untouched
+    br = t.str.contains(",", na=False)
+    t = t.mask(br, t.str.replace(".", "", regex=False)
+                    .str.replace(",", ".", regex=False))
+    # plain float64, not nullable Float64 -- the store and the dashboard expect
+    # NaN semantics, and a mix of the two dtypes survives concat badly
+    return pd.to_numeric(t, errors="coerce").astype("float64")
+
+
+def coerce_numeric(df: pd.DataFrame, cols: Iterable[str], where: str = "") -> pd.DataFrame:
+    """Coerce the named columns in place; report anything that had to be parsed."""
+    for c in cols:
+        if c not in df.columns:
+            continue
+        s = df[c]
+        if pd.api.types.is_numeric_dtype(s):
+            continue
+        conv = to_number(s)
+        n_text = int(s.notna().sum())
+        lost = int(n_text - conv.notna().sum())
+        if n_text and lost > 0.01 * n_text:
+            bad = s[conv.isna() & s.notna()].astype(str).unique()[:5]
+            print(f"  ! {where}{c}: read as text; {lost:,}/{n_text:,} values would not "
+                  f"parse as numbers (e.g. {list(bad)}) -- check the source format",
+                  file=sys.stderr)
+        else:
+            print(f"  . {where}{c}: read as text, coerced to numeric")
+        df[c] = conv
+    return df
+
+
+def to_date(s: pd.Series, where: str = "") -> pd.Series:
+    """Parse a timestamp column to midnight-normalised dates, NaT on failure."""
+    d = pd.to_datetime(s, errors="coerce", format="mixed")
+    bad = int(d.isna().sum() - pd.isna(s).sum())
+    if bad > 0:
+        print(f"  ! {where}{bad:,} row(s) had an unparseable timestamp", file=sys.stderr)
+    return d.dt.normalize()
 
 
 # --------------------------------------------------------------------------
@@ -293,10 +381,19 @@ def agg_balanco(paths: Iterable[Path]) -> pd.DataFrame:
     frames = []
     for p in paths:
         df = norm_columns(read_table(p))
+        missing = [c for c in ("din_instante", "id_subsistema") if c not in df.columns]
+        if missing:
+            print(f"  ! skipping {p.name}: missing {missing}", file=sys.stderr)
+            continue
         have = [c for c in cols if c in df.columns]
         df = df[have].copy()
-        df["date"] = pd.to_datetime(df["din_instante"]).dt.normalize()
         metrics = [c for c in BALANCO_METRICS if c in df.columns]
+        if not metrics:
+            print(f"  ! skipping {p.name}: no balance metrics present", file=sys.stderr)
+            continue
+        df = coerce_numeric(df, metrics, where=f"{p.name}: ")
+        df["date"] = to_date(df["din_instante"], where=f"{p.name}: ")
+        df = df.dropna(subset=["date"])
         g = df.groupby(["date", "id_subsistema"], observed=True)[metrics].mean()
         frames.append(g.reset_index())
     if not frames:
@@ -357,7 +454,8 @@ def _geracao_chunks(path: Path):
     else:
         opts = sniff_csv(path)
         reader = pd.read_csv(path, sep=opts["sep"], decimal=opts["decimal"],
-                             encoding="utf-8", chunksize=500_000, low_memory=False)
+                             thousands=opts["thousands"], encoding="utf-8",
+                             chunksize=500_000, low_memory=False)
         for chunk in reader:
             yield norm_columns(chunk)
 
@@ -370,7 +468,8 @@ def agg_geracao_file(path: Path) -> pd.DataFrame:
         missing = [c for c in GERACAO_COLS if c not in chunk.columns]
         if missing:
             raise KeyError(f"missing {missing}; found {list(chunk.columns)}")
-        chunk = chunk[GERACAO_COLS]
+        chunk = chunk[GERACAO_COLS].copy()
+        chunk = coerce_numeric(chunk, ["val_geracao"], where=f"{path.name}: ")
         # classify on the small set of distinct (tipo, combustivel) pairs, not row-wise
         pairs = chunk[["nom_tipousina", "nom_tipocombustivel"]].drop_duplicates()
         pairs["series"] = [classify_fuel(a, b) for a, b in
@@ -389,7 +488,8 @@ def agg_geracao_file(path: Path) -> pd.DataFrame:
     hourly = pd.concat(hourly_parts, ignore_index=True)
     hourly = hourly.groupby(["din_instante", "id_subsistema", "series"],
                             observed=True)["val_geracao"].sum().reset_index()
-    hourly["date"] = pd.to_datetime(hourly["din_instante"]).dt.normalize()
+    hourly["date"] = to_date(hourly["din_instante"], where=f"{path.name}: ")
+    hourly = hourly.dropna(subset=["date"])
     daily = hourly.groupby(["date", "id_subsistema", "series"],
                            observed=True)["val_geracao"].mean().reset_index()
     daily = daily.rename(columns={"id_subsistema": "subsystem",
@@ -443,8 +543,8 @@ def _chunks(path: Path, want: list[str]):
     else:
         opts = sniff_csv(path)
         for chunk in pd.read_csv(path, sep=opts["sep"], decimal=opts["decimal"],
-                                 encoding="utf-8", chunksize=500_000,
-                                 low_memory=False):
+                                 thousands=opts["thousands"], encoding="utf-8",
+                                 chunksize=500_000, low_memory=False):
             chunk = norm_columns(chunk)
             missing = [c for c in want if c not in chunk.columns]
             if missing:
@@ -457,7 +557,11 @@ def agg_termica_file(path: Path) -> pd.DataFrame:
     parts, fuels = [], []
     for chunk in _chunks(path, TERMICA_COLS):
         chunk = chunk.copy()
-        chunk["date"] = pd.to_datetime(chunk["din_instante"]).dt.normalize()
+        chunk = coerce_numeric(chunk, list(TERMICA_METRICS), where=f"{path.name}: ")
+        chunk["date"] = to_date(chunk["din_instante"], where=f"{path.name}: ")
+        chunk = chunk.dropna(subset=["date"])
+        if chunk.empty:
+            continue
         chunk["nom_usina"] = chunk["nom_usina"].astype(str).str.strip()
         fuels.append(chunk[["nom_usina", "id_subsistema",
                             "nom_tipocombustivel"]].drop_duplicates())
@@ -528,7 +632,11 @@ def agg_hidraulico_file(path: Path) -> pd.DataFrame:
     parts, ents = [], []
     for chunk in _chunks(path, HIDRO_COLS):
         chunk = chunk.copy()
-        chunk["date"] = pd.to_datetime(chunk["din_instante"]).dt.normalize()
+        chunk = coerce_numeric(chunk, list(HIDRO_METRICS), where=f"{path.name}: ")
+        chunk["date"] = to_date(chunk["din_instante"], where=f"{path.name}: ")
+        chunk = chunk.dropna(subset=["date"])
+        if chunk.empty:
+            continue
         chunk["nom_reservatorio"] = chunk["nom_reservatorio"].astype(str).str.strip()
         ents.append(chunk[["nom_reservatorio", "id_subsistema",
                            "nom_bacia"]].drop_duplicates())
@@ -584,7 +692,9 @@ def cached_agg(path: Path, fn, cache: Path | None, has_side: bool = False):
     `fn` returns either a frame, or (frame, side_table) when has_side is set.
     """
     st = path.stat()
-    tag = f"{path.stem}__{st.st_size}_{int(st.st_mtime)}"
+    # AGG_VERSION invalidates every cached result when the aggregation logic
+    # changes, so a fix does not sit behind results produced by the old code.
+    tag = f"{path.stem}__v2_{st.st_size}_{int(st.st_mtime)}"
     hit = (cache / f"{tag}.parquet") if cache else None
     side_path = (cache / f"{tag}.side.parquet") if cache else None
 
@@ -622,7 +732,9 @@ def agg_simple(paths: Iterable[Path], date_col: str,
         if not keep:
             continue
         df = df[["id_subsistema", date_col] + keep].copy()
-        df["date"] = pd.to_datetime(df[date_col]).dt.normalize()
+        df = coerce_numeric(df, keep, where=f"{p.name}: ")
+        df["date"] = to_date(df[date_col], where=f"{p.name}: ")
+        df = df.dropna(subset=["date"])
         out = df.melt(
             id_vars=["date", "id_subsistema"], value_vars=keep,
             var_name="col", value_name="value",
@@ -639,10 +751,12 @@ def agg_cmo(paths: Iterable[Path]) -> pd.DataFrame:
     frames = []
     for p in paths:
         df = norm_columns(read_table(p))
-        if "val_cmo" not in df.columns:
-            print(f"  ! skipping {p.name}: no val_cmo", file=sys.stderr)
+        if "val_cmo" not in df.columns or "din_instante" not in df.columns:
+            print(f"  ! skipping {p.name}: no val_cmo/din_instante", file=sys.stderr)
             continue
-        df["date"] = pd.to_datetime(df["din_instante"]).dt.normalize()
+        df = coerce_numeric(df, ["val_cmo"], where=f"{p.name}: ")
+        df["date"] = to_date(df["din_instante"], where=f"{p.name}: ")
+        df = df.dropna(subset=["date"])
         g = df.groupby(["date", "id_subsistema"], observed=True)["val_cmo"].mean()
         out = g.reset_index().rename(
             columns={"id_subsistema": "subsystem", "val_cmo": "value"}
