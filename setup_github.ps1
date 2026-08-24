@@ -1,4 +1,3 @@
-
 #Requires -Version 5.1
 <#
 .SYNOPSIS
@@ -33,7 +32,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$Name = "ons-balances",
+    [string]$Name = "ons-balances_6",
     [switch]$Private
 )
 
