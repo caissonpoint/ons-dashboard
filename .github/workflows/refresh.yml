@@ -1,0 +1,106 @@
+name: Refresh ONS dashboard
+
+# ONS publishes twice on weekdays (12:00 and 19:00 UTC). This runs after the
+# second pass, so each build sees the day's consolidated figures.
+on:
+  schedule:
+    - cron: "40 20 * * *"
+  workflow_dispatch:          # "Run workflow" button, for an on-demand rebuild
+  push:
+    branches: [main]
+    paths:                    # rebuild when the pipeline itself changes
+      - "ons_pipeline.py"
+      - "dashboard.py"
+      - ".github/workflows/refresh.yml"
+
+permissions:
+  contents: write             # for the keep-alive stamp commit
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # Raw ONS files are cached per calendar month. Within a month the key hits
+      # and nothing is re-saved; only the current month's file is re-downloaded
+      # each day, because `fetch` compares Content-Length against the local copy.
+      - name: Cache key for this month
+        id: ym
+        run: echo "ym=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore ONS source files
+        uses: actions/cache@v4
+        with:
+          path: |
+            raw
+            data/_cache
+          key: ons-raw-${{ steps.ym.outputs.ym }}
+          restore-keys: |
+            ons-raw-
+
+      - name: Check every source URL is reachable
+        run: python ons_pipeline.py verify
+
+      - name: Download new and revised files
+        run: python ons_pipeline.py fetch
+
+      - name: Aggregate to the daily store
+        run: python ons_pipeline.py build
+
+      # Refuse to publish a store that is stale or has lost data - on failure the
+      # previous deploy stays live rather than being replaced with a broken one.
+      - name: Health gate
+        run: |
+          python ons_pipeline.py health \
+            --max-age-days 5 \
+            --min-rows 100000 \
+            --min-series 15 \
+            --min-plants 50 \
+            --min-reservoirs 50
+
+      - name: Build the page
+        run: |
+          mkdir -p site
+          python ons_pipeline.py dashboard --html site/index.html
+          ls -la site/
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      # A scheduled workflow is disabled after 60 days without repository
+      # activity. This tiny daily commit keeps the cron alive and doubles as a
+      # visible record of when the data last refreshed.
+      - name: Stamp last refresh
+        run: |
+          python tools/stamp.py
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .state/last_refresh.json
+          git diff --staged --quiet || git commit -m "chore: refresh stamp [skip ci]"
+          git push
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

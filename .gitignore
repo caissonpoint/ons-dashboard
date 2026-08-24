@@ -1,0 +1,12 @@
+# Downloaded ONS source files and the derived store - both rebuildable,
+# both far too large for git. CI keeps them in the Actions cache instead.
+raw/
+data/
+site/
+ons_dashboard.html
+
+.venv/
+__pycache__/
+*.pyc
+node_modules/
+*.png
