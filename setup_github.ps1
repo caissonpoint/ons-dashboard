@@ -74,8 +74,10 @@ function Fail {
 function Invoke-Quiet {
     param([string]$Exe, [string[]]$CmdArgs)
     $global:LASTEXITCODE = 0
-    try { & $Exe @CmdArgs 2>$null 1>$null } catch { }
-    return $LASTEXITCODE
+    try { & $Exe @CmdArgs 2>&1 | Out-Null } catch { }
+    $code = $LASTEXITCODE
+    if ($null -eq $code) { $code = 0 }
+    return [int]$code
 }
 
 # Run a native command and capture stdout; returns .Out and .Code.
@@ -91,11 +93,16 @@ function Invoke-Capture {
 }
 
 # Run a native command and let the user watch it (push, repo create).
+# Out-Host is load-bearing: a PowerShell function returns everything left on the
+# pipeline, so without it git's progress output is returned alongside the exit
+# code and the caller compares an array to 0 instead of an integer.
 function Invoke-Loud {
     param([string]$Exe, [string[]]$CmdArgs)
     $global:LASTEXITCODE = 0
-    try { & $Exe @CmdArgs } catch { Write-Host $_.Exception.Message }
-    return $LASTEXITCODE
+    try { & $Exe @CmdArgs 2>&1 | Out-Host } catch { Write-Host $_.Exception.Message }
+    $code = $LASTEXITCODE
+    if ($null -eq $code) { $code = 0 }
+    return [int]$code
 }
 
 function Assert-Command {
