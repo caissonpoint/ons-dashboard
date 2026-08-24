@@ -151,26 +151,38 @@ if ((Invoke-Quiet git @("diff", "--staged", "--quiet")) -ne 0) {
 }
 
 # --------------------------------------------------------------------- repo
-if ((Invoke-Quiet gh @("repo", "view", "$owner/$Name")) -eq 0) {
-    Write-Step "Repo $owner/$Name already exists - reusing it"
-    if ((Invoke-Quiet git @("remote", "get-url", "origin")) -ne 0) {
-        Invoke-Quiet git @("remote", "add", "origin",
-                           "https://github.com/$owner/$Name.git") | Out-Null
-    }
-} else {
-    Write-Step "Creating $owner/$Name"
-    $code = Invoke-Loud gh @("repo", "create", $Name, $visibility,
-        "--source=.", "--remote=origin",
-        "--description=Brazilian grid balances from ONS open data, refreshed daily")
-    if ($code -ne 0) {
-        Fail "Could not create the repository." `
-             "A repo named '$Name' may already exist under an account you own."
+$remoteUrl = "https://github.com/$owner/$Name.git"
+
+# Set origin ourselves rather than letting `gh repo create --source=.` do it:
+# that flag fails outright if this folder already has an origin, which it does
+# after any earlier run.
+function Set-Origin {
+    param([string]$Url)
+    if ((Invoke-Quiet git @("remote", "get-url", "origin")) -eq 0) {
+        Invoke-Quiet git @("remote", "set-url", "origin", $Url) | Out-Null
+        Write-Ok "Pointed existing 'origin' at $Url"
+    } else {
+        Invoke-Quiet git @("remote", "add", "origin", $Url) | Out-Null
+        Write-Ok "Added remote 'origin'"
     }
 }
 
+if ((Invoke-Quiet gh @("repo", "view", "$owner/$Name")) -eq 0) {
+    Write-Step "Repo $owner/$Name already exists - reusing it"
+} else {
+    Write-Step "Creating $owner/$Name"
+    $code = Invoke-Loud gh @("repo", "create", $Name, $visibility,
+        "--description=Brazilian grid balances from ONS open data, refreshed daily")
+    if ($code -ne 0) {
+        Fail "Could not create the repository." `
+             "Pick another name with -Name, or delete the existing one on GitHub."
+    }
+}
+Set-Origin $remoteUrl
+
 Write-Step "Pushing"
 if ((Invoke-Loud git @("push", "-u", "origin", "main")) -ne 0) {
-    Fail "Push failed." "See the git message above - usually auth, or a non-empty remote."
+    Fail "Push failed." "See the git message above - usually auth or a non-empty remote."
 }
 
 # -------------------------------------------------------------------- Pages
