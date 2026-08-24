@@ -361,6 +361,41 @@ def to_date(s: pd.Series, where: str = "") -> pd.Series:
 
 
 # --------------------------------------------------------------------------
+# Column aliases
+#
+# ONS is not consistent about column names across datasets or across years.
+# The thermal dispatch file calls the fuel column `nom_combustivel`, while
+# Geracao por Usina calls the same thing `nom_tipocombustivel`. A mismatch
+# here does not raise anywhere visible -- the file is skipped and the dataset
+# quietly contributes nothing -- so resolve names rather than assume them.
+# --------------------------------------------------------------------------
+
+COL_ALIASES: dict[str, tuple[str, ...]] = {
+    "nom_combustivel": ("nom_tipocombustivel", "nom_tipo_combustivel"),
+    "nom_tipocombustivel": ("nom_combustivel", "nom_tipo_combustivel"),
+    "val_proggeracao": ("val_geracaoprogramada",),
+    "val_verifgeracao": ("val_geracaoverificada",),
+    "val_geracao": ("val_geracaoverificada",),
+}
+
+
+def resolve_columns(available: Iterable[str], want: list[str]) -> dict[str, str]:
+    """Map each wanted canonical name to the column actually present."""
+    have = {str(c).strip().lower(): str(c) for c in available}
+    out, missing = {}, []
+    for c in want:
+        for cand in (c,) + COL_ALIASES.get(c, ()):
+            if cand in have:
+                out[c] = have[cand]
+                break
+        else:
+            missing.append(c)
+    if missing:
+        raise KeyError(f"missing {missing}; file has {sorted(have)}")
+    return out
+
+
+# --------------------------------------------------------------------------
 # Aggregation to daily tidy frame: date | subsystem | series | value
 # --------------------------------------------------------------------------
 
@@ -446,18 +481,20 @@ def _geracao_chunks(path: Path):
         import pyarrow.parquet as pq
 
         pf = pq.ParquetFile(path)
-        have = [c for c in GERACAO_COLS if c in pf.schema_arrow.names]
-        if len(have) < len(GERACAO_COLS):
-            raise KeyError(f"missing {set(GERACAO_COLS) - set(have)}")
-        for batch in pf.iter_batches(batch_size=500_000, columns=have):
-            yield batch.to_pandas()
+        mapping = resolve_columns(pf.schema_arrow.names, GERACAO_COLS)
+        back = {v.strip().lower(): k for k, v in mapping.items()}
+        for batch in pf.iter_batches(batch_size=500_000,
+                                     columns=[mapping[c] for c in GERACAO_COLS]):
+            yield norm_columns(batch.to_pandas()).rename(columns=back)
     else:
         opts = sniff_csv(path)
         reader = pd.read_csv(path, sep=opts["sep"], decimal=opts["decimal"],
                              thousands=opts["thousands"], encoding="utf-8",
                              chunksize=500_000, low_memory=False)
         for chunk in reader:
-            yield norm_columns(chunk)
+            chunk = norm_columns(chunk)
+            mapping = resolve_columns(chunk.columns, GERACAO_COLS)
+            yield chunk.rename(columns={v: k for k, v in mapping.items()})
 
 
 def agg_geracao_file(path: Path) -> pd.DataFrame:
@@ -520,36 +557,41 @@ def agg_geracao(paths: Iterable[Path], cache: Path | None = None) -> pd.DataFram
 # Bulletin sheet 09: thermal generation per plant, programmed vs verified
 # --------------------------------------------------------------------------
 
+# The thermal dispatch file names the fuel column `nom_combustivel`. The
+# longer `nom_tipocombustivel` belongs to Geracao por Usina; COL_ALIASES
+# accepts either so both spellings resolve.
 TERMICA_COLS = ["din_instante", "id_subsistema", "nom_usina",
-                "nom_tipocombustivel", "val_proggeracao", "val_verifgeracao"]
+                "nom_combustivel", "val_proggeracao", "val_verifgeracao"]
 
 TERMICA_METRICS = {"val_proggeracao": "plant_prog",
                    "val_verifgeracao": "plant_verif"}
 
 
 def _chunks(path: Path, want: list[str]):
-    """Yield frames from one file, column-subset, without loading it whole."""
+    """Yield frames from one file, column-subset, without loading it whole.
+
+    Columns are resolved through COL_ALIASES and renamed to the canonical
+    names, so downstream code sees one stable schema.
+    """
     if path.suffix == ".parquet":
         import pyarrow.parquet as pq
 
         pf = pq.ParquetFile(path)
-        names = {n.lower(): n for n in pf.schema_arrow.names}
-        missing = [c for c in want if c not in names]
-        if missing:
-            raise KeyError(f"missing {missing}")
+        mapping = resolve_columns(pf.schema_arrow.names, want)
+        back = {v.strip().lower(): k for k, v in mapping.items()}
         for batch in pf.iter_batches(batch_size=500_000,
-                                     columns=[names[c] for c in want]):
-            yield norm_columns(batch.to_pandas())
+                                     columns=[mapping[c] for c in want]):
+            chunk = norm_columns(batch.to_pandas()).rename(columns=back)
+            yield chunk[want]
     else:
         opts = sniff_csv(path)
         for chunk in pd.read_csv(path, sep=opts["sep"], decimal=opts["decimal"],
                                  thousands=opts["thousands"], encoding="utf-8",
                                  chunksize=500_000, low_memory=False):
             chunk = norm_columns(chunk)
-            missing = [c for c in want if c not in chunk.columns]
-            if missing:
-                raise KeyError(f"missing {missing}")
-            yield chunk[want]
+            mapping = resolve_columns(chunk.columns, want)
+            back = {v: k for k, v in mapping.items()}
+            yield chunk[[mapping[c] for c in want]].rename(columns=back)
 
 
 def agg_termica_file(path: Path) -> pd.DataFrame:
@@ -564,7 +606,7 @@ def agg_termica_file(path: Path) -> pd.DataFrame:
             continue
         chunk["nom_usina"] = chunk["nom_usina"].astype(str).str.strip()
         fuels.append(chunk[["nom_usina", "id_subsistema",
-                            "nom_tipocombustivel"]].drop_duplicates())
+                            "nom_combustivel"]].drop_duplicates())
         # a plant appears once per hour, so the daily mean is a straight mean
         parts.append(
             chunk.groupby(["date", "id_subsistema", "nom_usina"], observed=True)[
@@ -588,7 +630,7 @@ def agg_termica_file(path: Path) -> pd.DataFrame:
     fmap = pd.concat(fuels, ignore_index=True).drop_duplicates(
         subset=["id_subsistema", "nom_usina"])
     fmap = fmap.rename(columns={"nom_usina": "entity", "id_subsistema": "subsystem",
-                                "nom_tipocombustivel": "group"})
+                                "nom_combustivel": "group"})
     return out[COLS], fmap
 
 
