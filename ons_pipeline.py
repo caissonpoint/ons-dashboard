@@ -64,10 +64,13 @@ SUBSYSTEMS = {
 
 # Fuel strings in nom_tipocombustivel/nom_combustivel that count as natural
 # gas. Matched as substrings against the deaccented, lowercased field, so
-# "gas natural" also catches "Gás Natural (Ciclo Combinado)" etc. Kept broad
-# on purpose -- this is a gas-focused dashboard, so an ambiguous fossil-fuel
-# string should lean toward being counted as gas rather than disappearing
-# into "thermal_other" (see the bare "gas" fallback in classify_fuel below).
+# "gas natural" also catches "Gás Natural (Ciclo Combinado)" etc. classify_fuel
+# additionally treats the bare deaccented label "gas" (ONS's own short form --
+# some plants/files report just "Gás" with no qualifier) as an exact match,
+# since that's unambiguous on its own; anything else that merely contains
+# "gas" gets a one-time stderr warning instead of being guessed at, so a
+# genuinely new/ambiguous variant surfaces for a deliberate add here rather
+# than being silently folded in (see classify_fuel below).
 GAS_FUELS = {"gas natural", "gnl", "lng", "gas de processo", "gas industrial",
              "gas de refinaria", "gas natural liquefeito"}
 
@@ -478,6 +481,8 @@ def classify_fuel(tipo_usina: str, combustivel: str) -> str | None:
         return None
     f = deaccent(combustivel)
     if any(k in f for k in GAS_FUELS):
+        return "thermal_gas"
+    if f == "gas":  # ONS's own bare label on some plants/files -- unambiguous
         return "thermal_gas"
     if "nuclear" in f or "uranio" in f:
         return "thermal_nuclear"

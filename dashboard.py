@@ -1073,6 +1073,11 @@ function renderKpis(){
     return;
   }
   if(extra){ extra.hidden=true; extra.innerHTML=""; }
+  if(state.view==="plants"){
+    host.hidden=false; host.innerHTML="";
+    renderPlantsKpis(host);
+    return;
+  }
   if(state.view!=="subsystems"){ host.hidden=true; host.innerHTML=""; return; }
   host.hidden=false; host.innerHTML="";
 
@@ -1318,6 +1323,82 @@ function renderBasinSummary(host){
   h+='</tbody></table></div>';
   card.innerHTML=h;
   host.appendChild(card);
+}
+
+/* ---------- Thermal Plants tab: gas KPI strip ---------------------------- */
+function isGasPlant(group){ return /g[aá]s/i.test(group||""); }
+function plantsLatestIdx(ents){
+  let best=-1;
+  ents.forEach(e=>{
+    const i=lastIdx(DATA.series[skey("plant_verif",e.subsystem,e.entity)]||[]);
+    if(i>best) best=i;
+  });
+  return best;
+}
+function renderPlantsKpis(host){
+  const plants=(DATA.entities||[]).filter(e=>e.kind==="plant");
+  if(!plants.length) return;
+  const gasPlants=plants.filter(e=>isGasPlant(e.group));
+
+  const asOf=plantsLatestIdx(plants);
+  if(asOf<0) return;
+  const asOfDate=DATA.dates[asOf];
+  const lagDays=DATA.dates.length-1-asOf;
+
+  host.appendChild(kpiTile("Latest available data", asOfDate, "",
+    lagDays>0
+      ? lagDays+" day"+(lagDays===1?"":"s")+" behind the most recent date in "+
+        "the store — ONS revises recent days after publication"
+      : "current through the newest published bulletin"));
+
+  if(!gasPlants.length){
+    host.appendChild(kpiTile("Gas-fired plants", "0", "",
+      "no plants in this store are classified as gas-fired"));
+    return;
+  }
+
+  let gasSum=0, gasOnline=0, top=null;
+  gasPlants.forEach(e=>{
+    const v=(DATA.series[skey("plant_verif",e.subsystem,e.entity)]||[])[asOf];
+    if(v==null) return;
+    gasSum+=v;
+    if(v>0) gasOnline++;
+    if(!top || v>top.v) top={e,v};
+  });
+
+  let thermalSum=0;
+  plants.forEach(e=>{
+    const v=(DATA.series[skey("plant_verif",e.subsystem,e.entity)]||[])[asOf];
+    if(v!=null) thermalSum+=v;
+  });
+
+  host.appendChild(kpiTile("Gas-fired plants online", gasOnline+" of "+gasPlants.length,
+    "", "verified generation > 0 · "+asOfDate, mixColor("gas")));
+
+  host.appendChild(kpiTile("Gas verified generation", fmtNum(gasSum,0), "MWmed",
+    (thermalSum>0
+      ? (100*gasSum/thermalSum).toFixed(1)+"% of all thermal plants dispatched"
+      : "")+" · "+asOfDate, mixColor("gas")));
+
+  if(top){
+    host.appendChild(kpiTile("Top gas plant", shorten(top.e.entity,22), "",
+      (DATA.subsystemLabels[top.e.subsystem]||top.e.subsystem)+" · "+
+      fmtNum(top.v,0)+" MWmed · "+asOfDate, mixColor("gas")));
+  }
+
+  let devSum=0, devN=0;
+  gasPlants.forEach(e=>{
+    const v=(DATA.series[skey("plant_verif",e.subsystem,e.entity)]||[])[asOf];
+    const p=(DATA.series[skey("plant_prog",e.subsystem,e.entity)]||[])[asOf];
+    if(v==null||p==null||Math.abs(p)<1e-6) return;
+    devSum+=100*(v-p)/p; devN++;
+  });
+  if(devN){
+    const dev=devSum/devN;
+    host.appendChild(kpiTile("Gas fleet vs. programmed", (dev>=0?"+":"")+dev.toFixed(1), "%",
+      "avg verified vs. day-ahead program across "+devN+" gas plant"+(devN===1?"":"s")+
+      " · "+(dev>=0?"over-delivering":"under-delivering")));
+  }
 }
 
 function render(){ renderKpis(); renderTiles(); renderCharts(); renderTable(); }
