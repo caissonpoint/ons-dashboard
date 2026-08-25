@@ -590,30 +590,51 @@ def agg_geracao(paths: Iterable[Path], cache: Path | None = None) -> pd.DataFram
 
 # The thermal dispatch file names the fuel column `nom_combustivel`. The
 # longer `nom_tipocombustivel` belongs to Geracao por Usina; COL_ALIASES
-# accepts either so both spellings resolve.
-TERMICA_COLS = ["din_instante", "id_subsistema", "nom_usina",
-                "nom_combustivel", "val_proggeracao", "val_verifgeracao"]
+# accepts either so both spellings resolve. It's treated as optional (see
+# `_chunks`/`agg_termica_file` below) -- ONS files before ~2026-04 don't
+# carry this column at all, but do carry the actual generation values, so
+# it must not gate whether a file's real numbers get used.
+TERMICA_REQUIRED = ["din_instante", "id_subsistema", "nom_usina",
+                    "val_proggeracao", "val_verifgeracao"]
+TERMICA_OPTIONAL = ["nom_combustivel"]
 
 TERMICA_METRICS = {"val_proggeracao": "plant_prog",
                    "val_verifgeracao": "plant_verif"}
 
 
-def _chunks(path: Path, want: list[str]):
+def _chunks(path: Path, want: list[str], optional: list[str] = ()):
     """Yield frames from one file, column-subset, without loading it whole.
 
     Columns are resolved through COL_ALIASES and renamed to the canonical
-    names, so downstream code sees one stable schema.
+    names, so downstream code sees one stable schema. `want` columns must
+    all be present in the file's schema or the whole file is skipped
+    (`resolve_columns` raises `KeyError`, uncaught here -- callers like
+    `agg_termica`/`agg_hidraulico` catch it per-file). `optional` columns
+    are included when the file's schema happens to carry them and silently
+    left out of the yielded frame otherwise -- callers check for their
+    presence via the yielded frame's own columns rather than assuming they
+    exist, so a missing optional column degrades that one attribute instead
+    of discarding the file's required columns along with it.
     """
     if path.suffix == ".parquet":
         import pyarrow.parquet as pq
 
         pf = pq.ParquetFile(path)
-        mapping = resolve_columns(pf.schema_arrow.names, want)
+        names = pf.schema_arrow.names
+        mapping = resolve_columns(names, want)
+        have_opt = []
+        for c in optional:
+            try:
+                mapping.update(resolve_columns(names, [c]))
+                have_opt.append(c)
+            except KeyError:
+                pass
+        cols = want + have_opt
         back = {v.strip().lower(): k for k, v in mapping.items()}
         for batch in pf.iter_batches(batch_size=500_000,
-                                     columns=[mapping[c] for c in want]):
+                                     columns=[mapping[c] for c in cols]):
             chunk = norm_columns(batch.to_pandas()).rename(columns=back)
-            yield chunk[want]
+            yield chunk[cols]
     else:
         opts = sniff_csv(path)
         for chunk in pd.read_csv(path, sep=opts["sep"], decimal=opts["decimal"],
@@ -621,14 +642,32 @@ def _chunks(path: Path, want: list[str]):
                                  chunksize=500_000, low_memory=False):
             chunk = norm_columns(chunk)
             mapping = resolve_columns(chunk.columns, want)
+            have_opt = []
+            for c in optional:
+                try:
+                    mapping.update(resolve_columns(chunk.columns, [c]))
+                    have_opt.append(c)
+                except KeyError:
+                    pass
+            cols = want + have_opt
             back = {v: k for k, v in mapping.items()}
-            yield chunk[[mapping[c] for c in want]].rename(columns=back)
+            yield chunk[[mapping[c] for c in cols]].rename(columns=back)
 
 
 def agg_termica_file(path: Path) -> pd.DataFrame:
-    """Hourly per-plant programmed/verified MWmed -> daily mean per plant."""
+    """Hourly per-plant programmed/verified MWmed -> daily mean per plant.
+
+    The fuel label (`nom_combustivel`) is optional per file, not required --
+    see the `_chunks` docstring for why. A file without it still contributes
+    its real `plant_prog`/`plant_verif` numbers; it just doesn't contribute
+    to the entity->fuel map for those rows. That's fine: a plant's identity
+    (name + subsystem) is stable over time, so the fuel map built from
+    whichever files DO carry the label (recent ones, so far) still applies
+    to that plant's full history once `fuel_split_from_plants` merges the
+    two by entity/subsystem -- it isn't merged by file or by date.
+    """
     parts, fuels = [], []
-    for chunk in _chunks(path, TERMICA_COLS):
+    for chunk in _chunks(path, TERMICA_REQUIRED, optional=TERMICA_OPTIONAL):
         chunk = chunk.copy()
         chunk = coerce_numeric(chunk, list(TERMICA_METRICS), where=f"{path.name}: ")
         chunk["date"] = to_date(chunk["din_instante"], where=f"{path.name}: ")
@@ -636,8 +675,9 @@ def agg_termica_file(path: Path) -> pd.DataFrame:
         if chunk.empty:
             continue
         chunk["nom_usina"] = chunk["nom_usina"].astype(str).str.strip()
-        fuels.append(chunk[["nom_usina", "id_subsistema",
-                            "nom_combustivel"]].drop_duplicates())
+        if "nom_combustivel" in chunk.columns:
+            fuels.append(chunk[["nom_usina", "id_subsistema",
+                                "nom_combustivel"]].drop_duplicates())
         # a plant appears once per hour, so the daily mean is a straight mean
         parts.append(
             chunk.groupby(["date", "id_subsistema", "nom_usina"], observed=True)[
@@ -657,11 +697,14 @@ def agg_termica_file(path: Path) -> pd.DataFrame:
                               "nom_usina": "entity"})
     out = out.dropna(subset=["value"])
 
-    # plant -> fuel map travels alongside the values, as a tiny attribute table
-    fmap = pd.concat(fuels, ignore_index=True).drop_duplicates(
-        subset=["id_subsistema", "nom_usina"])
-    fmap = fmap.rename(columns={"nom_usina": "entity", "id_subsistema": "subsystem",
-                                "nom_combustivel": "group"})
+    # plant -> fuel map travels alongside the values, as a tiny attribute
+    # table -- empty when this particular file never had nom_combustivel.
+    fmap = pd.DataFrame(columns=["entity", "subsystem", "group"])
+    if fuels:
+        fmap = pd.concat(fuels, ignore_index=True).drop_duplicates(
+            subset=["id_subsistema", "nom_usina"])
+        fmap = fmap.rename(columns={"nom_usina": "entity", "id_subsistema": "subsystem",
+                                    "nom_combustivel": "group"})
     return out[COLS], fmap
 
 
@@ -767,7 +810,13 @@ def cached_agg(path: Path, fn, cache: Path | None, has_side: bool = False):
     st = path.stat()
     # AGG_VERSION invalidates every cached result when the aggregation logic
     # changes, so a fix does not sit behind results produced by the old code.
-    tag = f"{path.stem}__v2_{st.st_size}_{int(st.st_mtime)}"
+    # Bumped to v3 for the fix making nom_combustivel optional in
+    # agg_termica_file -- old cached termica results were built before that
+    # file could even successfully aggregate (it raised and was skipped), so
+    # this mainly forces every previously-skipped termica file to actually
+    # run once under the new code, plus a one-time re-aggregate of anything
+    # else that shares this cache helper.
+    tag = f"{path.stem}__v3_{st.st_size}_{int(st.st_mtime)}"
     hit = (cache / f"{tag}.parquet") if cache else None
     side_path = (cache / f"{tag}.side.parquet") if cache else None
 
