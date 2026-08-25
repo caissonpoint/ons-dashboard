@@ -62,8 +62,14 @@ SUBSYSTEMS = {
     "N": "Norte",
 }
 
-# Fuel strings in nom_tipocombustivel that count as natural gas.
-GAS_FUELS = {"gas natural", "gás natural", "gas", "gnl", "gás"}
+# Fuel strings in nom_tipocombustivel/nom_combustivel that count as natural
+# gas. Matched as substrings against the deaccented, lowercased field, so
+# "gas natural" also catches "Gás Natural (Ciclo Combinado)" etc. Kept broad
+# on purpose -- this is a gas-focused dashboard, so an ambiguous fossil-fuel
+# string should lean toward being counted as gas rather than disappearing
+# into "thermal_other" (see the bare "gas" fallback in classify_fuel below).
+GAS_FUELS = {"gas natural", "gnl", "lng", "gas de processo", "gas industrial",
+             "gas de refinaria", "gas natural liquefeito"}
 
 
 # --------------------------------------------------------------------------
@@ -451,13 +457,27 @@ def deaccent(s: str) -> str:
     ).strip().lower()
 
 
+_WARNED_AMBIGUOUS_FUELS: set[str] = set()
+
+
 def classify_fuel(tipo_usina: str, combustivel: str) -> str | None:
-    """Map an ONS plant row to a thermal fuel series; None for non-thermal."""
+    """Map an ONS plant row to a thermal fuel series; None for non-thermal.
+
+    Unknown fuels deliberately fall into ``thermal_other`` rather than being
+    guessed at -- build_store's >3% fuel-split tripwire is what's supposed to
+    catch a real gap between the balance thermal total and the plant-level
+    splits, and a blind "contains 'gas' -> gas" catch-all defeated that by
+    silently absorbing any ambiguous string (a waste-gas or synthesis-gas
+    variant, say) before the tripwire ever saw it. Anything that still
+    contains "gas" after the explicit checks above gets a one-time stderr
+    warning instead, so it surfaces fast and can be added to GAS_FUELS
+    deliberately rather than folded in blindly.
+    """
     t = deaccent(tipo_usina)
     if not t.startswith("term"):  # TERMICA / TÉRMICA
         return None
     f = deaccent(combustivel)
-    if any(k in f for k in ("gas natural", "gnl", "lng", "gas de processo")):
+    if any(k in f for k in GAS_FUELS):
         return "thermal_gas"
     if "nuclear" in f or "uranio" in f:
         return "thermal_nuclear"
@@ -468,6 +488,12 @@ def classify_fuel(tipo_usina: str, combustivel: str) -> str | None:
     if any(k in f for k in ("biomassa", "bagaco", "licor", "residuo", "biogas",
                             "cavaco", "casca", "capim", "carvao vegetal")):
         return "thermal_biomass"
+    if "gas" in f and combustivel not in _WARNED_AMBIGUOUS_FUELS:
+        _WARNED_AMBIGUOUS_FUELS.add(combustivel)
+        print(f"  ! ambiguous fuel contains \"gas\" but isn't in GAS_FUELS -- "
+              f"classified as thermal_other, NOT counted as gas: {combustivel!r} "
+              f"(add it to GAS_FUELS in ons_pipeline.py if it should count)",
+              file=sys.stderr)
     return "thermal_other"
 
 
@@ -849,9 +875,12 @@ def normalize_balance(df: pd.DataFrame) -> pd.DataFrame:
 
     Sheets 03-07 of the Boletim Diario satisfy  Carga = Producao total - Intercambio,
     i.e. a positive interchange is a net EXPORT out of the subsystem. ONS's open-data
-    val_intercambio has carried both signs over the years, so rather than assume one,
-    detect it: whichever orientation reproduces the identity across the whole store
-    is the one we keep.
+    val_intercambio has carried both signs over the years -- and has been known to flip
+    convention mid-window, not just once at the start of the dataset -- so rather than
+    pick one global orientation, decide it per calendar year: whichever orientation
+    best reproduces the identity *within that year* is the one applied to it. A year
+    with too few observations to decide reliably on its own inherits the whole-history
+    default instead of flipping on noise.
     """
     gen = ["gen_hydro", "gen_thermal", "gen_wind", "gen_solar"]
     wide = df[df["entity"] == ""].pivot_table(
@@ -863,19 +892,41 @@ def normalize_balance(df: pd.DataFrame) -> pd.DataFrame:
     total = wide[have].sum(axis=1, min_count=len(have))
     implied_export = total - wide["load"]          # what the identity requires
 
-    flip = False
+    MIN_OBS = 20  # ~5 days x 4 subsystems; below this a year's own residual is noise
+    flip_years: set[int] = set()
     if "net_interchange" in wide.columns:
         both = pd.concat([implied_export, wide["net_interchange"]],
-                         axis=1).dropna()
+                         axis=1, keys=["implied", "reported"]).dropna()
         if len(both):
-            as_is = (both.iloc[:, 0] - both.iloc[:, 1]).abs().median()
-            flipped = (both.iloc[:, 0] + both.iloc[:, 1]).abs().median()
-            flip = flipped < as_is
-            resid = min(as_is, flipped)
-            scale = both.iloc[:, 0].abs().median() or 1
-            print(f"  interchange: {'flipped to' if flip else 'already'} "
-                  f"net-export sign, residual {resid:.1f} MWmed "
-                  f"({100 * resid / scale:.2f}% of median flow)")
+            def resid(sub, sign):
+                return (sub["implied"] + sign * sub["reported"]).abs().median()
+
+            as_is_all, flipped_all = resid(both, -1), resid(both, 1)
+            default_flip = flipped_all < as_is_all
+            scale_all = both["implied"].abs().median() or 1
+            r_all = min(as_is_all, flipped_all)
+            print(f"  interchange (whole-history default): "
+                  f"{'flip' if default_flip else 'keep'}, residual {r_all:.1f} MWmed "
+                  f"({100 * r_all / scale_all:.2f}% of median flow)")
+
+            years = both.index.get_level_values("date").year
+            for yr in sorted(years.unique()):
+                grp = both[years == yr]
+                scale = grp["implied"].abs().median() or 1
+                if len(grp) < MIN_OBS:
+                    if default_flip:
+                        flip_years.add(yr)
+                    print(f"  interchange {yr}: only {len(grp)} obs, using "
+                          f"whole-history default ({'flip' if default_flip else 'keep'})")
+                    continue
+                as_is, flipped = resid(grp, -1), resid(grp, 1)
+                yr_flip = flipped < as_is
+                if yr_flip:
+                    flip_years.add(yr)
+                r = min(as_is, flipped)
+                print(f"  interchange {yr}: {'flip' if yr_flip else 'keep'} "
+                      f"net-export sign, residual {r:.1f} MWmed "
+                      f"({100 * r / scale:.2f}% of median flow)")
 
     add = []
     tot = total.reset_index().rename(columns={0: "value"})
@@ -883,9 +934,11 @@ def normalize_balance(df: pd.DataFrame) -> pd.DataFrame:
     tot["series"], tot["entity"] = "production_total", ""
     add.append(tot.dropna(subset=["value"]))
 
-    if flip:
+    if flip_years:
         m = (df["series"] == "net_interchange") & (df["entity"] == "")
-        df.loc[m, "value"] = -df.loc[m, "value"]
+        yr = pd.to_datetime(df["date"]).dt.year
+        flip_mask = m & yr.isin(flip_years)
+        df.loc[flip_mask, "value"] = -df.loc[flip_mask, "value"]
 
     return pd.concat([df] + add, ignore_index=True)[COLS]
 

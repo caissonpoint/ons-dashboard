@@ -73,13 +73,36 @@ PALETTE_DARK = ["#3987e5", "#d95926", "#199e70", "#c98500",
 
 
 def add_sin(df: pd.DataFrame) -> pd.DataFrame:
-    """Derive national (SIN) rows for subsystem-level series only."""
+    """Derive national (SIN) rows for subsystem-level series only.
+
+    A summed SIN total is only meaningful if every subsystem that normally
+    reports the series actually reported it that day -- otherwise one
+    subsystem's file going missing silently understates the national total
+    instead of showing a gap. But "every subsystem that normally reports"
+    isn't the same count for every series: Brazil's only nuclear plants sit
+    in the SE subsystem, so thermal_nuclear structurally never has S/NE/N
+    rows to sum, while load/hydro/wind/solar are published for all four
+    subsystems every day. Requiring all 4 subsystems for every series would
+    make SIN thermal_nuclear (and similarly geographically concentrated
+    series) permanently NaN, which is its own silent-data bug -- so the
+    required non-null count is computed per series, from how many
+    subsystems have ever reported it at all, rather than one fixed number.
+    """
     sub = df[df["entity"] == ""]
     wide = sub.pivot_table(index=["date", "subsystem"], columns="series",
                            values="value", aggfunc="mean")
     summables = [s for s, m in SERIES_META.items()
                  if m[3] and not m[4] and s in wide.columns]
-    sin = wide[summables].groupby(level="date").sum(min_count=1)
+
+    expected_n = {
+        s: max(int(wide[s].groupby(level="subsystem")
+                   .apply(lambda x: x.notna().any()).sum()), 1)
+        for s in summables
+    }
+    sin = pd.DataFrame({
+        s: wide[s].groupby(level="date").sum(min_count=expected_n[s])
+        for s in summables
+    })
 
     if {"ear_mwmes", "ear_max_mwmes"} <= set(sin.columns):
         sin["ear_pct"] = 100 * sin["ear_mwmes"] / sin["ear_max_mwmes"]
@@ -88,7 +111,8 @@ def add_sin(df: pd.DataFrame) -> pd.DataFrame:
                              ("ena_storable_mwmes", "ena_storable_pct_mlt")]:
         if {val_col, pct_col} <= set(wide.columns):
             mlt = 100 * wide[val_col] / wide[pct_col].replace(0, pd.NA)
-            sin[pct_col] = 100 * sin[val_col] / mlt.groupby(level="date").sum(min_count=1)
+            sin[pct_col] = 100 * sin[val_col] / mlt.groupby(level="date").sum(
+                min_count=expected_n.get(val_col, 1))
 
     if "cmo" in wide.columns:
         sin["cmo"] = wide["cmo"].groupby(level="date").mean()
@@ -303,6 +327,10 @@ button[aria-pressed=true]{background:var(--accent);border-color:var(--accent);co
 .mix-legend{display:flex;flex-wrap:wrap;gap:5px 14px;margin-top:8px;
   font-size:11.5px;color:var(--text-2)}
 .mix-legend span{display:flex;align-items:center;gap:5px;white-space:nowrap}
+.cap-bar{height:10px;border-radius:4px;overflow:hidden;background:var(--grid);
+  min-width:90px}
+.cap-bar>div{height:100%}
+.band-label{font-size:11px;font-weight:600;white-space:nowrap}
 .panel-title{font-size:13px;font-weight:600;margin:0 0 2px}
 .panel-note{font-size:11.5px;color:var(--muted);margin:0 0 8px}
 .legend{display:flex;flex-wrap:wrap;gap:6px 16px;margin-top:8px;font-size:12px;
@@ -321,6 +349,7 @@ table.data{border-collapse:collapse;width:100%;font-size:12.5px;
 table.data th,table.data td{padding:5px 9px;border-bottom:1px solid var(--grid);
   text-align:right;white-space:nowrap}
 table.data th:first-child,table.data td:first-child{text-align:left}
+table.data th.l,table.data td.l{text-align:left}
 table.data thead th{position:sticky;top:0;background:var(--surface-1);
   color:var(--text-2);font-weight:600}
 .scroll{overflow-x:auto;max-height:460px;overflow-y:auto}
@@ -349,6 +378,7 @@ table.data thead th{position:sticky;top:0;background:var(--surface-1);
 <div class="tabs" id="tabs"></div>
 
 <div class="tiles" id="kpiTiles" style="margin-bottom:14px"></div>
+<div id="resSummary"></div>
 
 <div class="card">
   <div class="controls">
@@ -991,8 +1021,33 @@ function renderCount(){
 /* ---------- KPI strip: latest-data snapshot, gas-market lens ------------- */
 function mixColor(which){
   const pal = isDark()?DATA.paletteDark:DATA.paletteLight;
-  return {hydro:pal[2], gas:pal[1], wind:pal[0], solar:pal[3]}[which]
+  // fixed assignment, one fuel per palette slot, so colors stay stable
+  // across subsystems and don't depend on picker selection state
+  return {wind:pal[0], gas:pal[1], hydro:pal[2], solar:pal[3],
+    nuclear:pal[4], biomass:pal[5], coal:pal[6], oil:pal[7]}[which]
     || "var(--muted)";
+}
+// full fuel mix for one subsystem's latest available day -- Hydro/Gas/Coal/
+// Oil-diesel/Nuclear/Biomass/Wind/Solar, summing to production_total
+function fuelMix(sub){
+  const load=DATA.series[skey("load",sub)]||[];
+  let i=-1; for(let k=load.length-1;k>=0;k--) if(load[k]!=null){i=k;break;}
+  if(i<0) return null;
+  const at=m=>{ const a=DATA.series[skey(m,sub)]||[]; return a[i]==null?null:a[i]; };
+  const parts=[["Hydro",at("gen_hydro"),mixColor("hydro")],
+    ["Gas",at("gen_gas"),mixColor("gas")],
+    ["Coal",at("thermal_coal"),mixColor("coal")],
+    ["Oil/diesel",at("thermal_oil"),mixColor("oil")],
+    ["Nuclear",at("thermal_nuclear"),mixColor("nuclear")],
+    ["Biomass",at("thermal_biomass"),mixColor("biomass")],
+    ["Wind",at("gen_wind"),mixColor("wind")],
+    ["Solar",at("gen_solar"),mixColor("solar")]];
+  let prod=at("production_total");
+  if(prod==null){
+    const vals=parts.map(p=>p[1]).filter(v=>v!=null);
+    prod=vals.length?vals.reduce((a,b)=>a+b,0):null;
+  }
+  return {sub, date:DATA.dates[i], prod, parts:parts.filter(p=>p[1]!=null && p[1]>0)};
 }
 function kpiTile(label,big,unit,meta,color){
   const t=el("div","tile");
@@ -1003,16 +1058,25 @@ function kpiTile(label,big,unit,meta,color){
     (meta?'<div class="meta">'+meta+'</div>':'');
   return t;
 }
+const seriesArr=(m,s="SIN")=>DATA.series[skey(m,s)]||[];
+const lastIdx=arr=>{ for(let i=arr.length-1;i>=0;i--) if(arr[i]!=null) return i;
+  return -1; };
+
 function renderKpis(){
   const host=document.getElementById("kpiTiles");
+  const extra=document.getElementById("resSummary");
   if(!host) return;
+  if(state.view==="reservoirs"){
+    host.hidden=false; host.innerHTML="";
+    if(extra) extra.hidden=false, extra.innerHTML="";
+    renderReservoirKpis(host, extra);
+    return;
+  }
+  if(extra){ extra.hidden=true; extra.innerHTML=""; }
   if(state.view!=="subsystems"){ host.hidden=true; host.innerHTML=""; return; }
   host.hidden=false; host.innerHTML="";
 
   const dates=DATA.dates;
-  const seriesArr=(m,s="SIN")=>DATA.series[skey(m,s)]||[];
-  const lastIdx=arr=>{ for(let i=arr.length-1;i>=0;i--) if(arr[i]!=null) return i;
-    return -1; };
   const asOf=lastIdx(seriesArr("load"));
   if(asOf<0) return;
   const asOfDate=dates[asOf];
@@ -1087,23 +1151,173 @@ function renderKpis(){
       " MWmed · "+asOfDate));
   }
 
-  if(prodV){
-    const mix=[["Hydro",hydV,mixColor("hydro")],["Gas",gasV,mixColor("gas")],
-      ["Other thermal",nonGasV,mixColor()],["Wind",windV,mixColor("wind")],
-      ["Solar",solV,mixColor("solar")]].filter(m=>m[1]!=null && m[1]>0);
-    if(mix.length){
-      const wide=el("div","tile"); wide.style.gridColumn="1 / -1";
-      let h='<div class="nm">Load met by generation source · '+asOfDate+'</div>';
-      h+='<div class="mix-bar">'+mix.map(([nm,v,c])=>
-        '<div style="flex:'+Math.max(v,0)+';background:'+c+'" title="'+nm+' '+
-          fmtNum(v,0)+' MWmed"></div>').join("")+'</div>';
-      h+='<div class="mix-legend">'+mix.map(([nm,v,c])=>
-        '<span><span class="sw" style="background:'+c+';border-color:'+c+
-          '"></span>'+nm+' '+(100*v/prodV).toFixed(0)+'%</span>').join("")+'</div>';
-      wide.innerHTML=h;
-      host.appendChild(wide);
-    }
+  // Generation by fuel -- one row per subsystem currently toggled in the
+  // Subsystems selector above (SIN by default; switch to SE/S/NE/N for a
+  // regional breakdown). Full fuel granularity, shares sum to production.
+  DATA.subsystems.filter(s=>state.subs.has(s)).forEach(s=>{
+    const mix=fuelMix(s);
+    if(!mix || !mix.prod || !mix.parts.length) return;
+    const wide=el("div","tile"); wide.style.gridColumn="1 / -1";
+    const label=s==="SIN" ? "SIN (national)" : (DATA.subsystemLabels[s]||s);
+    let h='<div class="nm">Generation by fuel — '+label+' · '+mix.date+'</div>';
+    h+='<div class="mix-bar">'+mix.parts.map(([nm,v,c])=>
+      '<div style="flex:'+Math.max(v,0)+';background:'+c+'" title="'+nm+' '+
+        fmtNum(v,0)+' MWmed"></div>').join("")+'</div>';
+    h+='<div class="mix-legend">'+mix.parts.map(([nm,v,c])=>
+      '<span><span class="sw" style="background:'+c+';border-color:'+c+
+        '"></span>'+nm+' '+fmtNum(v,0)+' MWmed · '+
+        (100*v/mix.prod).toFixed(0)+'%</span>').join("")+'</div>';
+    wide.innerHTML=h;
+    host.appendChild(wide);
+  });
+}
+
+/* ---------- Reservoirs tab: regional + basin hydro summary --------------- */
+function earRow(sub){
+  const i=lastIdx(seriesArr("ear_pct",sub));
+  if(i<0) return null;
+  const at=(m,idx=i)=>{ const a=seriesArr(m,sub); return a[idx]==null?null:a[idx]; };
+  const pct=at("ear_pct"), pctPrior=at("ear_pct",Math.max(0,i-30));
+  return {sub, date:DATA.dates[i], pct, stored:at("ear_mwmes"),
+    cap:at("ear_max_mwmes"), enaPct:at("ena_pct_mlt"),
+    chg:(pct!=null&&pctPrior!=null)?pct-pctPrior:null};
+}
+function bandColor(pct){
+  if(pct==null) return "var(--muted)";
+  if(pct<30) return mixColor("oil");     // stressed
+  if(pct<60) return mixColor("gas");     // watch
+  return mixColor("hydro");              // healthy
+}
+function bandLabel(pct){
+  // Non-color redundant cue for the same red/amber/green banding, so the
+  // stress level doesn't rely on color perception alone.
+  if(pct==null) return "";
+  if(pct<30) return "Critical";
+  if(pct<60) return "Watch";
+  return "Healthy";
+}
+function reservoirExtremes(){
+  const ents=(DATA.entities||[]).filter(e=>e.kind==="reservoir");
+  let lowest=null, below=0, total=0;
+  ents.forEach(e=>{
+    const arr=DATA.series[skey("res_volutil_pct",e.subsystem,e.entity)]||[];
+    let v=null; for(let k=arr.length-1;k>=0;k--) if(arr[k]!=null){v=arr[k];break;}
+    if(v==null) return;
+    total++;
+    if(v<20) below++;
+    if(!lowest || v<lowest.v) lowest={entity:e.entity, subsystem:e.subsystem, group:e.group, v};
+  });
+  return {lowest, below, total};
+}
+function renderReservoirKpis(host, extra){
+  const asOf=lastIdx(seriesArr("ear_pct","SIN"));
+  if(asOf>=0){
+    const lagDays=DATA.dates.length-1-asOf;
+    host.appendChild(kpiTile("Latest available data", DATA.dates[asOf], "",
+      lagDays>0
+        ? lagDays+" day"+(lagDays===1?"":"s")+" behind the most recent date in "+
+          "the store — ONS revises recent days after publication"
+        : "current through the newest published bulletin"));
   }
+  const sin=earRow("SIN");
+  if(sin && sin.pct!=null){
+    host.appendChild(kpiTile("SIN reservoirs (EAR)", fmtNum(sin.pct,1), "%",
+      "national stored energy"+(sin.chg==null?"":" · "+(sin.chg>=0?"+":"")+
+        sin.chg.toFixed(1)+"pt vs 30d ago"), mixColor("hydro")));
+  }
+  if(sin && sin.enaPct!=null){
+    const below=sin.enaPct<100;
+    host.appendChild(kpiTile("National inflow (ENA)", fmtNum(sin.enaPct,0), "% of MLT",
+      (below?"below":"above")+" the long-term average — storage is likely "+
+      (below?"declining":"recovering")));
+  }
+  let worstSub=null,worstPct=Infinity;
+  DATA.subsystems.filter(s=>s!=="SIN").forEach(s=>{
+    const r=earRow(s);
+    if(r && r.pct!=null && r.pct<worstPct){ worstPct=r.pct; worstSub=s; }
+  });
+  if(worstSub){
+    host.appendChild(kpiTile("Most-stressed region", worstSub, "",
+      (DATA.subsystemLabels[worstSub]||worstSub)+" · "+fmtNum(worstPct,1)+
+      "% of capacity", bandColor(worstPct)));
+  }
+  const ext=reservoirExtremes();
+  if(ext.lowest){
+    host.appendChild(kpiTile("Lowest individual reservoir", fmtNum(ext.lowest.v,1), "%",
+      shorten(ext.lowest.entity,26)+" · "+(ext.lowest.group||"—")+" · "+
+      (DATA.subsystemLabels[ext.lowest.subsystem]||ext.lowest.subsystem),
+      bandColor(ext.lowest.v)));
+  }
+  if(ext.total){
+    host.appendChild(kpiTile("Reservoirs below 20%", ext.below+" of "+ext.total, "",
+      "usable volume critically low"));
+  }
+  if(extra){
+    renderReservoirRegionTable(extra);
+    renderBasinSummary(extra);
+  }
+}
+function renderReservoirRegionTable(host){
+  const rows=DATA.subsystems.map(s=>earRow(s)).filter(r=>r && r.pct!=null);
+  if(!rows.length) return;
+  const card=el("div","card"); card.style.marginBottom="14px";
+  let h='<p class="panel-title">Hydro reservoirs by region</p>'+
+    '<p class="panel-note">Stored energy (EAR) — how ONS aggregates reservoir '+
+    'levels across a cascade, since raw volume % alone can be misleading when '+
+    'reservoirs differ in generating potential per unit of water.</p>';
+  h+='<div class="scroll"><table class="data"><thead><tr>'+
+    '<th class="l">Region</th><th class="l">Capacity filled</th>'+
+    '<th>Stored / capacity (MWmês)</th><th>30d change</th>'+
+    '<th>Inflow, % of long-term avg</th></tr></thead><tbody>';
+  rows.forEach(r=>{
+    const label=r.sub==="SIN" ? "SIN (national)" : (DATA.subsystemLabels[r.sub]||r.sub);
+    const w=Math.max(0,Math.min(100,r.pct));
+    h+='<tr><td class="l">'+label+'</td>'+
+      '<td class="l"><div class="cap-bar" title="'+fmtNum(r.pct,1)+'% full">'+
+        '<div style="width:'+w+'%;background:'+bandColor(r.pct)+'"></div></div> '+
+        '<span class="band-label" style="color:'+bandColor(r.pct)+'">'+bandLabel(r.pct)+
+        '</span></td>'+
+      '<td>'+fmtNum(r.pct,1)+'% · '+fmtNum(r.stored,0)+' / '+fmtNum(r.cap,0)+'</td>'+
+      '<td>'+(r.chg==null?'–':(r.chg>=0?'+':'')+r.chg.toFixed(1)+'pt')+'</td>'+
+      '<td>'+(r.enaPct==null?'–':fmtNum(r.enaPct,0)+'%')+'</td></tr>';
+  });
+  h+='</tbody></table></div>';
+  card.innerHTML=h;
+  host.appendChild(card);
+}
+function renderBasinSummary(host){
+  const ents=(DATA.entities||[]).filter(e=>e.kind==="reservoir");
+  if(!ents.length) return;
+  const groups={};
+  ents.forEach(e=>{
+    const arr=DATA.series[skey("res_volutil_pct",e.subsystem,e.entity)]||[];
+    let v=null; for(let k=arr.length-1;k>=0;k--) if(arr[k]!=null){v=arr[k];break;}
+    if(v==null) return;
+    const key=e.subsystem+"|"+(e.group||"—");
+    (groups[key]=groups[key]||{sub:e.subsystem, basin:e.group||"—", vals:[]}).vals.push(v);
+  });
+  const rows=Object.values(groups).map(g=>({
+    sub:g.sub, basin:g.basin, n:g.vals.length,
+    avg:g.vals.reduce((a,b)=>a+b,0)/g.vals.length,
+    min:Math.min(...g.vals), max:Math.max(...g.vals)
+  })).sort((a,b)=>a.avg-b.avg);
+  if(!rows.length) return;
+  const card=el("div","card");
+  let h='<p class="panel-title">Usable volume by basin</p>'+
+    '<p class="panel-note">Latest reading per reservoir, averaged by basin · '+
+    'lowest first · individual reservoirs are still selectable below.</p>';
+  h+='<div class="scroll"><table class="data"><thead><tr>'+
+    '<th class="l">Basin</th><th class="l">Region</th><th>Reservoirs</th>'+
+    '<th>Avg</th><th>Min</th><th>Max</th></tr></thead><tbody>';
+  rows.forEach(r=>{
+    h+='<tr><td class="l">'+r.basin+'</td>'+
+      '<td class="l">'+(DATA.subsystemLabels[r.sub]||r.sub)+'</td>'+
+      '<td>'+r.n+'</td><td>'+fmtNum(r.avg,1)+'%</td>'+
+      '<td>'+fmtNum(r.min,1)+'%</td><td>'+fmtNum(r.max,1)+'%</td></tr>';
+  });
+  h+='</tbody></table></div>';
+  card.innerHTML=h;
+  host.appendChild(card);
 }
 
 function render(){ renderKpis(); renderTiles(); renderCharts(); renderTable(); }
