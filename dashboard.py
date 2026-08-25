@@ -797,24 +797,36 @@ function renderTiles(){
     renderCount();
     return;
   }
+  const dates=windowDates();
   picked().forEach(k=>{
-    const v=seriesValues(k).filter(x=>x!=null);
+    // Walk the raw (null-preserving) window so we know which calendar date
+    // the headline "last" value actually belongs to -- different series can
+    // have different publish lags, so two tiles' "latest" numbers are not
+    // guaranteed to be the same day. Showing the date makes that visible
+    // instead of implying every tile is as-of today.
+    const raw=seriesValues(k);
+    let lastIdx=-1;
+    for(let i=raw.length-1;i>=0;i--){ if(raw[i]!=null){ lastIdx=i; break; } }
+    const v=raw.filter(x=>x!=null);
     const t=el("div","tile"), unit=unitOf(k), dec=decOf(k);
-    if(!v.length){
+    if(lastIdx<0){
       t.innerHTML='<div class="nm">'+labelOf(k)+'</div><div class="big">–</div>';
       host.appendChild(t); return;
     }
-    const last=v[v.length-1], first=v[0];
+    const last=raw[lastIdx], lastDate=dates[lastIdx], first=v[0];
     const avg=v.reduce((a,b)=>a+b,0)/v.length;
     const chg = Math.abs(first)>1e-9 ? 100*(last-first)/Math.abs(first) : null;
+    const chgTxt = chg==null ? "" :
+      (chg>=0
+        ? ' · +'+chg.toFixed(1)+'% over '+dates.length+'-day range'
+        : ' · '+chg.toFixed(1)+'% under '+dates.length+'-day range');
     t.innerHTML =
       '<div class="nm"><span class="sw" style="background:'+colorOf(k)+
         ';border-color:'+colorOf(k)+'"></span>'+labelOf(k)+'</div>'+
       '<div class="big">'+fmtNum(last,dec)+' <span style="font-size:12px;'+
         'color:var(--text-2);font-weight:400">'+unit+'</span></div>'+
-      '<div class="meta">avg '+fmtNum(avg,dec)+' · min '+fmtNum(Math.min(...v),dec)+
-        ' · max '+fmtNum(Math.max(...v),dec)+
-        (chg==null?"":' · '+(chg>=0?"+":"")+chg.toFixed(1)+'% over range')+'</div>';
+      '<div class="meta">as of '+lastDate+' · avg '+fmtNum(avg,dec)+' · min '+
+        fmtNum(Math.min(...v),dec)+' · max '+fmtNum(Math.max(...v),dec)+chgTxt+'</div>';
     host.appendChild(t);
   });
   renderCount();
