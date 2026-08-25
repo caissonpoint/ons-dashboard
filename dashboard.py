@@ -15,6 +15,12 @@ from pathlib import Path
 
 import pandas as pd
 
+# Self-hosted, embedded as a base64 @font-face at build time (see
+# write_dashboard) so the page has no external font dependency -- unlike the
+# Adobe Typekit link this replaces, it renders correctly offline and doesn't
+# phone home to a third party on every page load.
+FONT_PATH = Path(__file__).parent / "fonts" / "Degular.ttf"
+
 SUBSYSTEM_ORDER = ["SIN", "SE", "S", "NE", "N"]
 SUBSYSTEM_LABELS = {
     "SIN": "SIN (national)",
@@ -56,6 +62,12 @@ SERIES_META: dict[str, tuple[str, str, str, bool, str]] = {
     # per-reservoir (bulletin sheets 23-26)
     "res_volutil_pct":      ("Usable volume",        "%",     "Reservoir", False, "reservoir"),
     "res_level_m":          ("Upstream level",       "m",     "Reservoir", False, "reservoir"),
+    # per-REE (EAR Diario por REE -- finer than subsystem, coarser than an
+    # individual reservoir; not exposed as its own picker tab, only consumed
+    # directly by the Reservoirs tab's REE summary table).
+    "ear_ree_mwmes":        ("EAR (REE), stored",    "MWmês", "Hydrology", False, "ree"),
+    "ear_ree_max_mwmes":    ("EAR (REE), capacity",  "MWmês", "Hydrology", False, "ree"),
+    "ear_ree_pct":          ("EAR (REE), % of capacity", "%", "Hydrology", False, "ree"),
 }
 
 UNIT_PANELS = [
@@ -234,7 +246,18 @@ def write_dashboard(df: pd.DataFrame, dest: Path,
     payload = build_payload(df, ent)
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     packed = base64.b64encode(gzip.compress(raw, 9)).decode("ascii")
-    html = TEMPLATE.replace("__PAYLOAD__", packed)
+    if FONT_PATH.exists():
+        font_b64 = base64.b64encode(FONT_PATH.read_bytes()).decode("ascii")
+        font_face = (
+            "@font-face{font-family:'Degular';font-weight:400;font-style:normal;"
+            "font-display:swap;src:url(data:font/ttf;base64," + font_b64 +
+            ") format('truetype');}"
+        )
+    else:
+        # Repo checkout missing fonts/Degular.ttf -- degrade to the system
+        # fallback stack rather than shipping a broken @font-face rule.
+        font_face = ""
+    html = TEMPLATE.replace("__PAYLOAD__", packed).replace("__FONT_FACE__", font_face)
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(html, encoding="utf-8")
     print(f"  payload {len(raw)/1e6:.1f} MB JSON -> {len(packed)/1e6:.1f} MB embedded")
@@ -248,22 +271,17 @@ TEMPLATE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ONS Balances</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232a78d6'/%3E%3Cpath d='M3 11.5 6 7l3 2.5L13 4' stroke='white' stroke-width='1.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="https://use.typekit.net/xgf3jlp.css">
 <style>
+__FONT_FACE__
 :root{
   color-scheme: light;
   --surface-1:#fcfcfb; --plane:#f4f4f1; --text-1:#0b0b0b; --text-2:#52514e;
   --muted:#898781; --grid:#e1e0d9; --axis:#c3c2b7; --ring:rgba(11,11,11,.10);
   --accent:#2a78d6; --wash:rgba(42,120,214,.08);
 }
-@media (prefers-color-scheme: dark){
- :root:not([data-theme="light"]){
-  color-scheme: dark;
-  --surface-1:#1a1a19; --plane:#0d0d0d; --text-1:#fff; --text-2:#c3c2b7;
-  --muted:#898781; --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10);
-  --accent:#3987e5; --wash:rgba(57,135,229,.14);
- }
-}
+/* Defaults to Light Mode regardless of the OS/browser color-scheme
+   preference -- dark only applies when the visitor explicitly toggles it
+   with the Theme button below (data-theme="dark"), not automatically. */
 :root[data-theme="dark"]{
   color-scheme: dark;
   --surface-1:#1a1a19; --plane:#0d0d0d; --text-1:#fff; --text-2:#c3c2b7;
@@ -272,7 +290,7 @@ TEMPLATE = r"""<!doctype html>
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--plane);color:var(--text-1);
-  font:14px/1.5 "motiva-sans","Motiva Sans","Motiva Sans W01",system-ui,-apple-system,"Segoe UI",sans-serif;}
+  font:14px/1.5 "Degular",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;}
 .wrap{max-width:1440px;margin:0 auto;padding:20px 20px 64px}
 header{display:flex;flex-wrap:wrap;gap:12px;align-items:baseline;
   justify-content:space-between;margin-bottom:14px}
@@ -447,8 +465,9 @@ function claimSlot(key, v){
 }
 const releaseSlot = (k, v) => slotMap(v).delete(k);
 function isDark(){
-  const t=document.documentElement.dataset.theme;
-  return t==="dark" || (!t && matchMedia("(prefers-color-scheme: dark)").matches);
+  // Light by default, regardless of OS preference -- dark only when the
+  // visitor has explicitly toggled it via the Theme button.
+  return document.documentElement.dataset.theme==="dark";
 }
 const colorOf = (k, v) =>
   (isDark()?DATA.paletteDark:DATA.paletteLight)[claimSlot(k, v)];
@@ -1271,8 +1290,49 @@ function renderReservoirKpis(host, extra){
   }
   if(extra){
     renderReservoirRegionTable(extra);
+    renderReeTable(extra);
     renderBasinSummary(extra);
   }
+}
+function reeRow(e){
+  const i=lastIdx(DATA.series[skey("ear_ree_pct",e.subsystem,e.entity)]||[]);
+  if(i<0) return null;
+  const at=(m,idx=i)=>{ const a=DATA.series[skey(m,e.subsystem,e.entity)]||[];
+    return a[idx]==null?null:a[idx]; };
+  const pct=at("ear_ree_pct"), pctPrior=at("ear_ree_pct",Math.max(0,i-30));
+  return {entity:e.entity, sub:e.subsystem, date:DATA.dates[i], pct,
+    stored:at("ear_ree_mwmes"), cap:at("ear_ree_max_mwmes"),
+    chg:(pct!=null&&pctPrior!=null)?pct-pctPrior:null};
+}
+function renderReeTable(host){
+  const ents=(DATA.entities||[]).filter(e=>e.kind==="ree");
+  if(!ents.length) return;
+  const rows=ents.map(reeRow).filter(r=>r && r.pct!=null).sort((a,b)=>a.pct-b.pct);
+  if(!rows.length) return;
+  const card=el("div","card"); card.style.marginBottom="14px";
+  let h='<p class="panel-title">EAR by Reservoir Equivalent (REE)</p>'+
+    '<p class="panel-note">ONS’s own cascade-level storage figures — finer '+
+    'than the 4-region view above; the region table is these REEs summed up, so two '+
+    'can be moving in opposite directions underneath one steady regional number. '+
+    'Lowest first.</p>';
+  h+='<div class="scroll"><table class="data"><thead><tr>'+
+    '<th class="l">Reservoir Equivalent</th><th class="l">Region</th>'+
+    '<th class="l">Capacity filled</th><th>Stored / capacity (MWmês)</th>'+
+    '<th>30d change</th></tr></thead><tbody>';
+  rows.forEach(r=>{
+    const w=Math.max(0,Math.min(100,r.pct));
+    h+='<tr><td class="l">'+r.entity+'</td>'+
+      '<td class="l">'+(DATA.subsystemLabels[r.sub]||r.sub)+'</td>'+
+      '<td class="l"><div class="cap-bar" title="'+fmtNum(r.pct,1)+'% full">'+
+        '<div style="width:'+w+'%;background:'+bandColor(r.pct)+'"></div></div> '+
+        '<span class="band-label" style="color:'+bandColor(r.pct)+'">'+bandLabel(r.pct)+
+        '</span></td>'+
+      '<td>'+fmtNum(r.pct,1)+'% · '+fmtNum(r.stored,0)+' / '+fmtNum(r.cap,0)+'</td>'+
+      '<td>'+(r.chg==null?'–':(r.chg>=0?'+':'')+r.chg.toFixed(1)+'pt')+'</td></tr>';
+  });
+  h+='</tbody></table></div>';
+  card.innerHTML=h;
+  host.appendChild(card);
 }
 function renderReservoirRegionTable(host){
   const rows=DATA.subsystems.map(s=>earRow(s)).filter(r=>r && r.pct!=null);
@@ -1447,8 +1507,8 @@ async function boot(){
     'Source: <a href="https://dados.ons.org.br" target="_blank" rel="noopener">ONS '+
     'Dados Abertos</a> (CC-BY). Balanço de Energia nos Subsistemas · Geração por '+
     'Usina em Base Horária · Geração Térmica por Motivo de Despacho (sheet 09) · '+
-    'ENA/EAR Diário por Subsistema · Dados Hidráulicos por Reservatório (sheets '+
-    '23–26) · CMO Semi-Horário. Hourly and semi-hourly sources are averaged to '+
+    'ENA/EAR Diário por Subsistema · EAR Diário por REE · Dados Hidráulicos por '+
+    'Reservatório (sheets 23–26) · CMO Semi-Horário. Hourly and semi-hourly sources are averaged to '+
     'daily means. SIN rows are summed for absolute series; EAR % and ENA %MLT are '+
     'rebuilt from their components, CMO is an unweighted subsystem mean. '+
     'Net interchange is positive when the subsystem is a net exporter, matching the '+

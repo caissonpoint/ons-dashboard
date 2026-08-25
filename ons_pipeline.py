@@ -10,12 +10,17 @@ Datasets pulled (all from https://dados.ons.org.br, CC-BY):
   geracao   Geracao por Usina em Base Horaria   (hourly -> daily mean by fuel)
   ena       ENA Diario por Subsistema           (daily, MWmes and %MLT)
   ear       EAR Diario por Subsistema           (daily, MWmes and %)
+  ear_ree   EAR Diario por REE - Reservatorio Equivalente de Energia (daily,
+            MWmes and %, one row per Reservatorio Equivalente -- a finer
+            granularity than subsystem, coarser than an individual reservoir)
   cmo       CMO Semi-Horario                    (30-min -> daily mean, R$/MWh)
   termica   Geracao Termica por Motivo de Despacho (hourly per plant -> daily
             programmed/verified MWmed; bulletin sheet 09, and the source of the
             thermal-by-fuel splits)
   hidraulico Dados Hidraulicos por Reservatorio    (daily per reservoir: upstream
-            level and usable volume %; bulletin sheets 23-26)
+            level and usable volume %; bulletin sheets 23-26). Also the source
+            of the REE -> subsystem crosswalk `ear_ree` needs, since the REE
+            file itself carries no subsystem column.
   geracao   Geracao por Usina em Base Horaria    (optional, large; only needed if
             you want fuel splits over the full plant universe)
 
@@ -120,6 +125,24 @@ SOURCES: dict[str, Source] = {
         label="EAR Diario por Subsistema",
         s3_dir="ear_subsistema_di",
         stem=lambda y, m: f"EAR_DIARIO_SUBSISTEMA_{y}",
+    ),
+    # EAR Diario por REE - Reservatorio Equivalente de Energia: same quantity
+    # as `ear` above (stored energy, MWmes and %) but at REE granularity --
+    # 12 reservoir-equivalent cascades rather than 4 subsystems. `ear`'s own
+    # numbers are just these summed up, so this is genuinely new information:
+    # two REEs feeding the same subsystem can move in opposite directions
+    # while the subsystem total nets them out. Confirmed against ONS's own
+    # data dictionary (ear_ree_di/DicionarioDados_EarPorResEquivalente.json)
+    # and a live file (EAR_DIARIO_REE_2026.csv) on 2026-08-25 -- columns are
+    # nom_ree, ear_data, ear_max_ree, ear_verif_ree_mwmes,
+    # ear_verif_ree_percentual; parquet/csv/xlsx published back to 2016.
+    "ear_ree": Source(
+        key="ear_ree",
+        label="EAR Diario por REE - Reservatorio Equivalente de Energia",
+        s3_dir="ear_ree_di",
+        stem=lambda y, m: f"EAR_DIARIO_REE_{y}",
+        parquet_from=2016,
+        first_year=2016,
     ),
     "cmo": Source(
         key="cmo",
@@ -904,6 +927,125 @@ EAR_METRICS = {
 }
 
 
+# --------------------------------------------------------------------------
+# EAR Diario por REE - Reservatorio Equivalente de Energia
+#
+# The file itself carries no subsystem column, only nom_ree (e.g. "PARANA",
+# "IGUACU", "SUDESTE" -- 12 REEs covering the country, not a 1:1 match with
+# the 4 subsystems). Rather than hand-maintain a REE -> subsystem lookup
+# from memory -- easy to get an edge case like Itaipu/Parana/Paranapanema
+# wrong, and silently stale if ONS ever regroups a REE -- the mapping is
+# derived from the per-reservoir `hidraulico` files this pipeline already
+# downloads, which carry both nom_ree and id_subsistema on every row. Same
+# authoritative ONS data, not a guess.
+# --------------------------------------------------------------------------
+
+EAR_REE_COLS = ["nom_ree", "ear_data", "ear_max_ree",
+               "ear_verif_ree_mwmes", "ear_verif_ree_percentual"]
+
+EAR_REE_METRICS = {
+    "ear_verif_ree_mwmes": "ear_ree_mwmes",
+    "ear_verif_ree_percentual": "ear_ree_pct",
+    "ear_max_ree": "ear_ree_max_mwmes",
+}
+
+
+def ree_subsystem_map(hidro_dir: Path) -> dict[str, str]:
+    """REE name -> subsystem, derived from the per-reservoir hidraulico files.
+
+    Every hidraulico row carries both nom_ree and id_subsistema, and a REE
+    reports under one subsystem consistently, so a majority vote across
+    every row/file/year seen is robust to a stray bad row without needing a
+    hand-maintained table. Returns {} (nothing mappable) if hidraulico raw
+    files aren't present -- `agg_ear_ree` degrades to dropping every REE row
+    with a warning rather than raising, so running `ear_ree` without
+    `hidraulico` fails soft, not hard.
+    """
+    if not hidro_dir.exists():
+        return {}
+    files = sorted(p for p in hidro_dir.iterdir() if p.suffix in (".parquet", ".csv"))
+    parts = []
+    for p in files:
+        try:
+            for chunk in _chunks(p, ["nom_ree", "id_subsistema"]):
+                parts.append(chunk)
+        except Exception as e:
+            print(f"  ! ree map: skipping {p.name}: {e}", file=sys.stderr)
+            continue
+    if not parts:
+        return {}
+    df = pd.concat(parts, ignore_index=True)
+    df["nom_ree"] = df["nom_ree"].astype(str).str.strip().str.upper()
+    df["id_subsistema"] = df["id_subsistema"].astype(str).str.strip().str.upper()
+    df = df.dropna(subset=["nom_ree", "id_subsistema"])
+    counts = df.groupby(["nom_ree", "id_subsistema"], observed=True).size()
+    counts = counts.reset_index(name="n")
+    idx = counts.groupby("nom_ree", observed=True)["n"].idxmax()
+    top = counts.loc[idx]
+    return dict(zip(top["nom_ree"], top["id_subsistema"]))
+
+
+def agg_ear_ree_file(path: Path, ree_map: dict[str, str]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Already daily, one row per REE per day."""
+    parts, unmapped = [], set()
+    for chunk in _chunks(path, EAR_REE_COLS):
+        chunk = chunk.copy()
+        chunk = coerce_numeric(chunk, list(EAR_REE_METRICS), where=f"{path.name}: ")
+        chunk["date"] = to_date(chunk["ear_data"], where=f"{path.name}: ")
+        chunk = chunk.dropna(subset=["date"])
+        if chunk.empty:
+            continue
+        chunk["nom_ree"] = chunk["nom_ree"].astype(str).str.strip().str.upper()
+        chunk["subsystem"] = chunk["nom_ree"].map(ree_map)
+        unmapped |= set(chunk.loc[chunk["subsystem"].isna(), "nom_ree"].unique())
+        chunk = chunk.dropna(subset=["subsystem"])
+        if chunk.empty:
+            continue
+        parts.append(chunk[["date", "subsystem", "nom_ree"] + list(EAR_REE_METRICS)])
+    if unmapped:
+        print(f"  ! {path.name}: REE(s) with no known subsystem, dropped: "
+              f"{sorted(unmapped)} (needs hidraulico raw files covering that REE)",
+              file=sys.stderr)
+    if not parts:
+        return pd.DataFrame(columns=COLS), pd.DataFrame()
+    df = pd.concat(parts, ignore_index=True)
+    df = df.groupby(["date", "subsystem", "nom_ree"],
+                    observed=True)[list(EAR_REE_METRICS)].mean().reset_index()
+    out = df.melt(id_vars=["date", "subsystem", "nom_ree"],
+                  value_vars=list(EAR_REE_METRICS),
+                  var_name="col", value_name="value")
+    out["series"] = out["col"].map(EAR_REE_METRICS)
+    out = out.rename(columns={"nom_ree": "entity"})
+    out = out.dropna(subset=["value"])
+    emap = df[["subsystem", "nom_ree"]].drop_duplicates().rename(columns={"nom_ree": "entity"})
+    emap["group"] = "REE"
+    return out[COLS], emap
+
+
+def agg_ear_ree(paths: Iterable[Path], ree_map: dict[str, str]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Small, already-daily files (12 REEs x ~365 rows/year) -- no cache needed."""
+    frames, ents = [], []
+    for p in paths:
+        try:
+            part, ent = agg_ear_ree_file(p, ree_map)
+        except Exception as e:
+            print(f"  ! skipping {p.name}: {e}", file=sys.stderr)
+            continue
+        if not part.empty:
+            frames.append(part)
+        if not ent.empty:
+            ents.append(ent)
+    if not frames:
+        return pd.DataFrame(columns=COLS), pd.DataFrame()
+    out = pd.concat(frames, ignore_index=True)[COLS]
+    e = pd.DataFrame()
+    if ents:
+        e = pd.concat(ents, ignore_index=True).drop_duplicates(
+            subset=["subsystem", "entity"], keep="last")
+        e["kind"] = "ree"
+    return out, e
+
+
 def fuel_split_from_plants(df: pd.DataFrame, ent: pd.DataFrame) -> pd.DataFrame:
     """Roll per-plant verified generation up into thermal_<fuel> by subsystem.
 
@@ -1016,6 +1158,11 @@ def build_store(raw: Path, out: Path, keys: list[str]) -> pd.DataFrame:
             part = agg_simple(files, "ena_data", ENA_METRICS)
         elif key == "ear":
             part = agg_simple(files, "ear_data", EAR_METRICS)
+        elif key == "ear_ree":
+            ree_map = ree_subsystem_map(raw / "hidraulico")
+            part, ent = agg_ear_ree(files, ree_map)
+            if not ent.empty:
+                entities.append(ent)
         elif key == "cmo":
             part = agg_cmo(files)
         elif key == "termica":
@@ -1190,7 +1337,8 @@ def cmd_health(args) -> int:
     if ent_path.exists():
         ent = pd.read_parquet(ent_path)
         for kind, floor in (("plant", args.min_plants),
-                            ("reservoir", args.min_reservoirs)):
+                            ("reservoir", args.min_reservoirs),
+                            ("ree", args.min_ree)):
             n = int((ent["kind"] == kind).sum())
             checks.append((kind + "s", n, n >= floor, f">= {floor}"))
 
@@ -1236,6 +1384,7 @@ def main(argv=None) -> int:
                    help="health: minimum distinct subsystem-level series")
     p.add_argument("--min-plants", type=int, default=0)
     p.add_argument("--min-reservoirs", type=int, default=0)
+    p.add_argument("--min-ree", type=int, default=0)
     args = p.parse_args(argv)
 
     return {

@@ -83,7 +83,7 @@ for y in YEARS:
     # ena / ear: daily
     days = pd.date_range(idx[0].normalize(), idx[-1].normalize(), freq="D")
     ds = season(days)
-    ena, ear = [], []
+    ena, ear, ear_ree = [], [], []
     for sub, k in SCALE.items():
         mlt = 30000 * k
         bruta = mlt * (1 + 0.55 * ds) * (1 + np.random.normal(0, .12, len(days)))
@@ -102,9 +102,22 @@ for y in YEARS:
             "ear_max_subsistema": cap, "ear_verif_subsistema_mwmes": cap * pct / 100,
             "ear_verif_subsistema_percentual": pct,
         }))
-    for name, frames in (("ena", ena), ("ear", ear)):
+        # EAR by REE: mock hidraulico below sets nom_ree = the subsystem code
+        # for every reservoir (a simplification -- real ONS has ~12 REEs that
+        # don't map 1:1 to the 4 subsystems), so one mock REE per subsystem
+        # here lines up with that and exercises the full ree_subsystem_map ->
+        # agg_ear_ree path. Perturbed independently of the subsystem-level
+        # `ear` series so the two are visibly distinct, not just duplicates.
+        pct_ree = np.clip(pct + np.random.normal(0, 3, len(days)), 2, 100)
+        ear_ree.append(pd.DataFrame({
+            "nom_ree": sub, "ear_data": days,
+            "ear_max_ree": cap, "ear_verif_ree_mwmes": cap * pct_ree / 100,
+            "ear_verif_ree_percentual": pct_ree,
+        }))
+    for name, frames in (("ena", ena), ("ear", ear), ("ear_ree", ear_ree)):
         d = RAW / name; d.mkdir(parents=True, exist_ok=True)
-        fn = {"ena": "ENA_DIARIO_SUBSISTEMA", "ear": "EAR_DIARIO_SUBSISTEMA"}[name]
+        fn = {"ena": "ENA_DIARIO_SUBSISTEMA", "ear": "EAR_DIARIO_SUBSISTEMA",
+              "ear_ree": "EAR_DIARIO_REE"}[name]
         pd.concat(frames).to_parquet(d / f"{fn}_{y}.parquet", index=False)
     print("mock", y, "written")
 
