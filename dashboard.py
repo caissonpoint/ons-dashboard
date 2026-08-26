@@ -59,6 +59,20 @@ SERIES_META: dict[str, tuple[str, str, str, bool, str]] = {
     "plant_verif":          ("Verified",             "MWmed", "Thermal plant", False, "plant"),
     "plant_prog":           ("Programmed",           "MWmed", "Thermal plant", False, "plant"),
     "plant_desvio_pct":     ("Deviation",            "%",     "Thermal plant", False, "plant"),
+    # capacity/utilization/gas-consumption -- derived client-side from a
+    # static per-entity attribute (capacity_mw / heat_rate_kcal_per_kwh, from
+    # ONS's Capacidade Instalada de Geracao, joined by CEG) plus plant_verif.
+    # Not every plant has a capacity_mw (see attach_capacity in
+    # ons_pipeline.py); not every plant is gas-fired, so plant_gas_m3 is
+    # narrower still. See the footer for the heat-rate assumption.
+    "plant_capacity_mw":    ("Installed capacity",   "MW",    "Thermal plant", False, "plant"),
+    "plant_utilization_pct":("Utilization",          "%",     "Thermal plant", False, "plant"),
+    "plant_gas_m3":         ("Est. gas consumption", "m³", "Thermal plant", False, "plant"),
+    # subsystem/SIN rollups of the same, python-computed in build_payload
+    # (add_capacity_metrics) since they sum over many plants at once rather
+    # than one entity's own static attribute.
+    "thermal_utilization_pct": ("Thermal fleet utilization", "%", "Balance", False, ""),
+    "gas_consumption_m3":   ("Est. gas consumption",  "m³", "Balance", False, ""),
     # per-reservoir (bulletin sheets 23-26)
     "res_volutil_pct":      ("Usable volume",        "%",     "Reservoir", False, "reservoir"),
     "res_level_m":          ("Upstream level",       "m",     "Reservoir", False, "reservoir"),
@@ -72,9 +86,11 @@ SERIES_META: dict[str, tuple[str, str, str, bool, str]] = {
 
 UNIT_PANELS = [
     ("MWmed", "MWmed"),
+    ("MW", "Installed capacity (MW)"),
     ("MWm\u00eas", "MWm\u00eas"),
     ("%", "Percent"),
     ("m", "Level \u2014 metres"),
+    ("m\u00b3", "Estimated gas consumption (m\u00b3)"),
     ("R$/MWh", "R$/MWh"),
 ]
 
@@ -168,6 +184,61 @@ def add_derived(df: pd.DataFrame) -> pd.DataFrame:
                      ignore_index=True)
 
 
+def add_capacity_metrics(df: pd.DataFrame, ent: pd.DataFrame) -> pd.DataFrame:
+    """Subsystem/SIN rollups of plant utilization and estimated gas consumption.
+
+    Per-plant capacity_mw/utilization_pct/gas_m3 are cheap to derive client-side
+    from plant_verif (see plant_capacity_mw/plant_utilization_pct/plant_gas_m3
+    in the JS `fullSeries`), the same way plant_desvio_pct already is -- but a
+    subsystem or national figure sums over many plants at once, so that part is
+    done once here rather than repeated in every browser.
+
+    thermal_utilization_pct is scoped to plants this store could actually attach
+    a capacity_mw to (see attach_capacity in ons_pipeline.py) -- a plant with no
+    known capacity contributes to neither the numerator nor the denominator,
+    rather than silently understating the true fleet-wide figure. Likewise
+    gas_consumption_m3 only includes plants with a known heat rate (gas-fired,
+    per classify_fuel). SIN is computed directly from every matched plant
+    (not by summing the four subsystem figures), so the %-utilization figure
+    stays a true ratio rather than an average-of-averages.
+    """
+    if ent.empty or "capacity_mw" not in ent.columns:
+        return df
+    plants = ent[(ent["kind"] == "plant") & ent["capacity_mw"].notna()].copy()
+    if plants.empty:
+        return df
+    verif = df[df["series"] == "plant_verif"]
+    m = verif.merge(plants[["entity", "subsystem", "capacity_mw",
+                            "heat_rate_kcal_per_kwh"]],
+                    on=["entity", "subsystem"], how="inner")
+    if m.empty:
+        return df
+    # daily mean MW * 24h = MWh; *1000 -> kWh; * heat rate (kcal/kWh) / 9400
+    # (kcal/m3, Brazil's standard PCS for natural gas) -> m3/day. See
+    # HEAT_RATE_COMBINED_CYCLE / HEAT_RATE_SIMPLE_CYCLE / NATGAS_KCAL_PER_M3
+    # in ons_pipeline.py for the assumption itself and its caveats.
+    m["gas_m3"] = m["value"] * 24 * 1000 * m["heat_rate_kcal_per_kwh"] / 9400.0
+
+    def rollup(frame: pd.DataFrame, subsystem_label: str | None) -> pd.DataFrame:
+        g = frame.groupby("date", observed=True).agg(
+            verif=("value", "sum"), cap=("capacity_mw", "sum"),
+            gas=("gas_m3", "sum"))
+        out = pd.DataFrame({
+            "thermal_utilization_pct": 100 * g["verif"] / g["cap"].replace(0, pd.NA),
+            "gas_consumption_m3": g["gas"],
+        }).reset_index()
+        out = out.melt(id_vars="date", var_name="series", value_name="value")
+        out["subsystem"] = subsystem_label
+        out["entity"] = ""
+        return out.dropna(subset=["value"])
+
+    parts = [rollup(grp, sub) for sub, grp in m.groupby("subsystem", observed=True)]
+    parts.append(rollup(m, "SIN"))
+    add = pd.concat(parts, ignore_index=True)
+    return pd.concat([df, add[["date", "subsystem", "entity", "series", "value"]]],
+                     ignore_index=True)
+
+
 def pick_defaults(df: pd.DataFrame, ent: pd.DataFrame) -> dict:
     """Opening selections: the biggest gas plants, one reservoir per subsystem.
 
@@ -204,6 +275,7 @@ def build_payload(df: pd.DataFrame, ent: pd.DataFrame) -> dict:
     df["entity"] = df["entity"].fillna("").astype(str)
     df = add_sin(df)
     df = add_derived(df)
+    df = add_capacity_metrics(df, ent)
 
     dates = sorted(df["date"].unique())
     idx = {d: i for i, d in enumerate(dates)}
@@ -242,7 +314,8 @@ def build_payload(df: pd.DataFrame, ent: pd.DataFrame) -> dict:
 def write_dashboard(df: pd.DataFrame, dest: Path,
                     ent: pd.DataFrame | None = None) -> Path:
     if ent is None:
-        ent = pd.DataFrame(columns=["kind", "entity", "subsystem", "group"])
+        ent = pd.DataFrame(columns=["kind", "entity", "subsystem", "group",
+                                    "capacity_mw", "heat_rate_kcal_per_kwh"])
     payload = build_payload(df, ent)
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     packed = base64.b64encode(gzip.compress(raw, 9)).decode("ascii")
@@ -370,6 +443,8 @@ table.data th:first-child,table.data td:first-child{text-align:left}
 table.data th.l,table.data td.l{text-align:left}
 table.data thead th{position:sticky;top:0;background:var(--surface-1);
   color:var(--text-2);font-weight:600}
+table.data thead th.sortable{cursor:pointer;user-select:none}
+table.data thead th.sortable:hover{background:var(--wash)}
 .scroll{overflow-x:auto;max-height:460px;overflow-y:auto}
 .empty{color:var(--muted);padding:26px 0;text-align:center}
 .foot{color:var(--muted);font-size:11.5px;margin-top:22px;line-height:1.7}
@@ -492,11 +567,30 @@ function labelOf(k){
   if(!e) return DATA.seriesMeta[m].label + " · " + s;
   return DATA.seriesMeta[m].label + " · " + e + (ambiguous(e) ? " ("+s+")" : "");
 }
+let ENT_BY_KEY=null;
+function entityOf(sub,ent){
+  if(ENT_BY_KEY===null){
+    ENT_BY_KEY=new Map();
+    (DATA.entities||[]).forEach(x=>ENT_BY_KEY.set(x.subsystem+"|"+x.entity, x));
+  }
+  return ENT_BY_KEY.get(sub+"|"+ent);
+}
+const numOrNull=v=> (typeof v==="number" && isFinite(v)) ? v : null;
 function exists(k){
   const [m,s,e]=k.split("|");
   if(m==="plant_desvio_pct")
     return DATA.series[skey("plant_verif",s,e)]!==undefined
         && DATA.series[skey("plant_prog",s,e)]!==undefined;
+  if(m==="plant_capacity_mw" || m==="plant_utilization_pct"){
+    const ent=entityOf(s,e);
+    return DATA.series[skey("plant_verif",s,e)]!==undefined
+        && ent!=null && numOrNull(ent.capacity_mw)!=null;
+  }
+  if(m==="plant_gas_m3"){
+    const ent=entityOf(s,e);
+    return DATA.series[skey("plant_verif",s,e)]!==undefined
+        && ent!=null && numOrNull(ent.heat_rate_kcal_per_kwh)!=null;
+  }
   return DATA.series[k]!==undefined;
 }
 
@@ -533,6 +627,15 @@ function fullSeries(key){
       const y=p[i];
       return (x==null||y==null||Math.abs(y)<1e-6)?null:100*(x-y)/y;
     });
+  } else if(m==="plant_capacity_mw" || m==="plant_utilization_pct" || m==="plant_gas_m3"){
+    const ent=entityOf(s,e);
+    const cap=ent?numOrNull(ent.capacity_mw):null;
+    const hr=ent?numOrNull(ent.heat_rate_kcal_per_kwh):null;
+    const v=smoothed(DATA.series[skey("plant_verif",s,e)]||[]);
+    if(m==="plant_capacity_mw") out=v.map(x=>(x==null||cap==null)?null:cap);
+    else if(m==="plant_utilization_pct")
+      out=v.map(x=>(x==null||cap==null||cap<=0)?null:100*x/cap);
+    else out=v.map(x=>(x==null||hr==null)?null:x*24*1000*hr/9400);
   } else {
     out=smoothed(DATA.series[key]||[]);
   }
@@ -548,6 +651,71 @@ function el(tag, cls, txt){
   if(txt!=null) e.textContent=txt;
   return e;
 }
+
+/* ---------- generic sortable data tables -----------------------------------
+   Click a <table class="data"> column header: first click on a column sorts
+   that column highest -> lowest; a second click on the SAME column sorts
+   lowest -> highest; further clicks keep toggling. Clicking a DIFFERENT
+   column starts that column fresh at highest -> lowest. Works on any table
+   regardless of how its rows were built (innerHTML or DOM appendChild) since
+   it only touches the resulting <thead>/<tbody> DOM, and persists sort
+   choices across re-renders (these tables are fully torn down and rebuilt on
+   every render()) via `sortState`, keyed per table id. Excludes the chart
+   hover-tooltip table, which never calls makeSortable. ----------------------*/
+const sortState={};   // tableId -> {col:int, dir:"asc"|"desc"}
+function cellSortValue(td){
+  const t=(td?td.textContent:"").trim();
+  if(t===""||t==="–") return null;
+  const cleaned=t.replace(/[,%\s]/g,"");
+  if(cleaned!=="" && !isNaN(cleaned)) return parseFloat(cleaned);
+  return t.toLowerCase();
+}
+function sortTableRows(table,col,dir){
+  const tbody=table.tBodies[0]; if(!tbody) return;
+  const rows=[...tbody.rows];
+  rows.sort((ra,rb)=>{
+    const a=cellSortValue(ra.cells[col]), b=cellSortValue(rb.cells[col]);
+    if(a==null && b==null) return 0;
+    if(a==null) return 1;             // rows with no value in this column sort last
+    if(b==null) return -1;
+    const cmp = (typeof a==="number" && typeof b==="number")
+      ? a-b : String(a).localeCompare(String(b));
+    return dir==="asc" ? cmp : -cmp;
+  });
+  rows.forEach(r=>tbody.appendChild(r));
+}
+function paintSortIndicators(table,id){
+  const headRow=table.tHead && table.tHead.rows[table.tHead.rows.length-1];
+  if(!headRow) return;
+  const st=sortState[id];
+  [...headRow.cells].forEach((th,i)=>{
+    if(th.dataset.label===undefined) th.dataset.label=th.textContent;
+    const label=th.dataset.label;
+    if(!label){ th.textContent=""; return; }   // blank header (e.g. checkbox column)
+    th.textContent = label + (st && st.col===i ? (st.dir==="asc"?" ▲":" ▼") : "");
+  });
+}
+function makeSortable(table,id){
+  if(!table || !table.tHead) return;
+  const headRow=table.tHead.rows[table.tHead.rows.length-1];
+  if(!headRow) return;
+  [...headRow.cells].forEach((th,i)=>{
+    if(!th.textContent) return;               // blank header: not sortable
+    th.classList.add("sortable");
+    th.onclick=()=>{
+      const cur=sortState[id];
+      sortState[id] = (cur && cur.col===i)
+        ? {col:i, dir: cur.dir==="desc"?"asc":"desc"}
+        : {col:i, dir:"desc"};
+      sortTableRows(table, sortState[id].col, sortState[id].dir);
+      paintSortIndicators(table, id);
+    };
+  });
+  const st=sortState[id];
+  if(st) sortTableRows(table, st.col, st.dir);
+  paintSortIndicators(table, id);
+}
+
 function buildTabs(){
   const host=document.getElementById("tabs"); host.innerHTML="";
   VIEWS.forEach(v=>{
@@ -786,6 +954,7 @@ function renderEntityList(){
   });
   table.appendChild(tbody);
   host.appendChild(table);
+  makeSortable(table, "entlist-"+kind);
 }
 function syncEntitySelection(){
   // when the metric toggles change, rebuild the picked list from the same entities
@@ -1028,7 +1197,9 @@ function renderTable(){
   for(let i=dates.length-1;i>=0;i--)
     h+="<tr><td>"+dates[i]+"</td>"+
       cols.map(c=>"<td>"+fmtNum(c.vals[i],decOf(c.key))+"</td>").join("")+"</tr>";
-  document.getElementById("dataTable").innerHTML=h+"</tbody>";
+  const t=document.getElementById("dataTable");
+  t.innerHTML=h+"</tbody>";
+  makeSortable(t, "dataTable");
 }
 function downloadCSV(){
   const {dates,cols}=tableData();
@@ -1180,6 +1351,15 @@ function renderKpis(){
   if(cmoV!=null){
     host.appendChild(kpiTile("CMO (spot price)", fmtNum(cmoV,0), "R$/MWh",
       "national average · "+asOfDate));
+  }
+  const utilV=valAt("thermal_utilization_pct"), gasM3V=valAt("gas_consumption_m3");
+  if(utilV!=null){
+    host.appendChild(kpiTile("Thermal fleet utilization", fmtNum(utilV,1), "%",
+      "plants matched to a capacity figure, all fuels · "+asOfDate, mixColor("gas")));
+  }
+  if(gasM3V!=null){
+    host.appendChild(kpiTile("Est. gas consumption", fmtNum(gasM3V,0), "m³/day",
+      "national · heat-rate assumption, see footer · "+asOfDate, mixColor("gas")));
   }
   if(flowSub){
     host.appendChild(kpiTile(flowLabel, flowSub, "",
@@ -1333,6 +1513,7 @@ function renderReeTable(host){
   h+='</tbody></table></div>';
   card.innerHTML=h;
   host.appendChild(card);
+  makeSortable(card.querySelector("table"), "reeTable");
 }
 function renderReservoirRegionTable(host){
   const rows=DATA.subsystems.map(s=>earRow(s)).filter(r=>r && r.pct!=null);
@@ -1361,6 +1542,7 @@ function renderReservoirRegionTable(host){
   h+='</tbody></table></div>';
   card.innerHTML=h;
   host.appendChild(card);
+  makeSortable(card.querySelector("table"), "resRegionTable");
 }
 function renderBasinSummary(host){
   const ents=(DATA.entities||[]).filter(e=>e.kind==="reservoir");
@@ -1395,6 +1577,7 @@ function renderBasinSummary(host){
   h+='</tbody></table></div>';
   card.innerHTML=h;
   host.appendChild(card);
+  makeSortable(card.querySelector("table"), "basinTable");
 }
 
 /* ---------- Thermal Plants tab: gas KPI strip ---------------------------- */
@@ -1458,6 +1641,24 @@ function renderPlantsKpis(host){
       fmtNum(top.v,0)+" MWmed · "+asOfDate, mixColor("gas")));
   }
 
+  let gasCapSum=0, gasCapVerif=0, gasM3Sum=0, nCapMatched=0;
+  gasPlants.forEach(e=>{
+    const v=(DATA.series[skey("plant_verif",e.subsystem,e.entity)]||[])[asOf];
+    if(v==null) return;
+    const cap=numOrNull(e.capacity_mw), hr=numOrNull(e.heat_rate_kcal_per_kwh);
+    if(cap!=null){ gasCapSum+=cap; gasCapVerif+=v; nCapMatched++; }
+    if(hr!=null) gasM3Sum += v*24*1000*hr/9400;
+  });
+  if(nCapMatched){
+    host.appendChild(kpiTile("Gas fleet utilization", fmtNum(100*gasCapVerif/gasCapSum,1),
+      "%", nCapMatched+" of "+gasPlants.length+" gas plant"+(gasPlants.length===1?"":"s")+
+      " matched to a capacity figure · "+asOfDate, mixColor("gas")));
+  }
+  if(gasM3Sum>0){
+    host.appendChild(kpiTile("Est. gas consumption", fmtNum(gasM3Sum,0), "m³/day",
+      "gas fleet · heat-rate assumption, see footer · "+asOfDate, mixColor("gas")));
+  }
+
   let devSum=0, devN=0;
   gasPlants.forEach(e=>{
     const v=(DATA.series[skey("plant_verif",e.subsystem,e.entity)]||[])[asOf];
@@ -1508,11 +1709,26 @@ async function boot(){
     'Dados Abertos</a> (CC-BY). Balanço de Energia nos Subsistemas · Geração por '+
     'Usina em Base Horária · Geração Térmica por Motivo de Despacho (sheet 09) · '+
     'ENA/EAR Diário por Subsistema · EAR Diário por REE · Dados Hidráulicos por '+
-    'Reservatório (sheets 23–26) · CMO Semi-Horário. Hourly and semi-hourly sources are averaged to '+
+    'Reservatório (sheets 23–26) · CMO Semi-Horário · Capacidade Instalada de '+
+    'Geração. Hourly and semi-hourly sources are averaged to '+
     'daily means. SIN rows are summed for absolute series; EAR % and ENA %MLT are '+
     'rebuilt from their components, CMO is an unweighted subsystem mean. '+
     'Net interchange is positive when the subsystem is a net exporter, matching the '+
-    'bulletin. ONS revises recent days after publication. Built '+DATA.generated+'.';
+    'bulletin. ONS revises recent days after publication.<br>'+
+    'Capacity, utilization &amp; gas consumption: installed capacity is joined from '+
+    'ONS’s Capacidade Instalada de Geração by ANEEL venture ID (CEG), summing each '+
+    'venture’s active generating units. A plant ONS dispatches as several named '+
+    'phases sharing one CEG (a combined-cycle block, e.g. "Plant P0/P1/P2") is shown '+
+    'as one combined entity with the venture’s real total capacity; the individual '+
+    'phases keep their own generation figures but no capacity/utilization of their '+
+    'own, to avoid overstating either. Estimated gas consumption applies a heat-rate '+
+    '<b>assumption</b> ONS does not publish per plant — 1,800 kcal/kWh for '+
+    'combined-cycle blocks, 2,500 kcal/kWh for single-phase (simple-cycle) gas '+
+    'plants, both typical industry figures, not plant-specific — against '+
+    '9,400 kcal/m³ for natural gas (Brazil’s standard calorific value). A plant '+
+    'whose CEG could not be matched (older bulletins predate the ceg column, or the '+
+    'plant has since been deactivated/renamed) shows no capacity, utilization, or '+
+    'gas-consumption figure. Built '+DATA.generated+'.';
 
   ["from","to"].forEach(id=>{
     const inp=document.getElementById(id);

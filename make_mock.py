@@ -124,14 +124,25 @@ for y in YEARS:
 # --------------------------------------------------------------------------
 # termica (per-plant programmed vs verified) and hidraulico (per-reservoir)
 # --------------------------------------------------------------------------
+# ceg: one ANEEL-venture id per plant, mirroring the real Capacidade Instalada
+# de Geracao / termica dispatch join key (see ons_pipeline.attach_capacity).
+# SPLIT_PLANTS marks the first Gas Natural plant in each subsystem as a mock
+# combined-cycle block dispatched under two named phases sharing one ceg --
+# exercises the multi-phase rollup path the same way real plants like
+# "Maranhao 4 P0/P1/P2" do, without complicating the other 90% of plants.
 PLANTS = []
+CEGS = {}            # (sub, nom) -> ceg
+SPLIT_PLANTS = set()  # (sub, nom) mocked as a 2-phase combined-cycle block
 for sub, k in SCALE.items():
     for fuel, share, n in [("Gás Natural", .45, 8), ("Carvão", .10, 3),
                            ("Óleo Diesel", .08, 4), ("Nuclear", .07, 2),
                            ("Biomassa", .20, 6), ("Óleo Combustível", .10, 3)]:
         for i in range(n):
-            PLANTS.append((f"{fuel.split()[0].upper()} {sub}{i+1}", sub, fuel,
-                           share * k / n))
+            nom = f"{fuel.split()[0].upper()} {sub}{i+1}"
+            PLANTS.append((nom, sub, fuel, share * k / n))
+            CEGS[(sub, nom)] = f"CEG-{sub}-{fuel[:2].upper()}-{i}"
+            if fuel == "Gás Natural" and i == 0:
+                SPLIT_PLANTS.add((sub, nom))
 
 BASINS = {"SE": ["GRANDE", "PARANA", "TOCANTINS", "DOCE", "AMAZONAS"],
           "S": ["IGUACU", "JACUI", "URUGUAI"], "NE": ["SAO FRANCISCO"],
@@ -148,15 +159,19 @@ for y in YEARS:
     rows = []
     for nom, sub, fuel, w in PLANTS:
         prog = ter_shape * w * (1 + np.random.normal(0, .05, len(idx)))
-        rows.append(pd.DataFrame({
-            "din_instante": idx, "nom_tipopatamar": "Media",
-            "id_subsistema": sub, "nom_subsistema": SUBS[sub], "nom_usina": nom,
-            "cod_usinaplanejamento": nom[:6], "ceg": "X",
-            "nom_tipocombustivel": fuel,
-            "val_proggeracao": np.clip(prog, 0, None),
-            "val_verifgeracao": np.clip(prog * (1 + np.random.normal(0, .07, len(idx))),
-                                        0, None),
-        }))
+        phases = [(f"{nom} P0", 0.6), (f"{nom} P1", 0.4)] \
+            if (sub, nom) in SPLIT_PLANTS else [(nom, 1.0)]
+        for phase_nom, phase_share in phases:
+            pprog = prog * phase_share
+            rows.append(pd.DataFrame({
+                "din_instante": idx, "nom_tipopatamar": "Media",
+                "id_subsistema": sub, "nom_subsistema": SUBS[sub], "nom_usina": phase_nom,
+                "cod_usinaplanejamento": phase_nom[:6], "ceg": CEGS[(sub, nom)],
+                "nom_tipocombustivel": fuel,
+                "val_proggeracao": np.clip(pprog, 0, None),
+                "val_verifgeracao": np.clip(pprog * (1 + np.random.normal(0, .07, len(idx))),
+                                            0, None),
+            }))
     d = RAW / "termica"; d.mkdir(parents=True, exist_ok=True)
     pd.concat(rows).to_parquet(d / f"GERACAO_TERMICA_DESPACHO-2_{y}.parquet", index=False)
 
@@ -183,3 +198,28 @@ for y in YEARS:
     d = RAW / "hidraulico"; d.mkdir(parents=True, exist_ok=True)
     pd.concat(hrows).to_parquet(d / f"DADOS_HIDROLOGICOS_RES_{y}.parquet", index=False)
     print("mock termica+hidraulico", y, "written")
+
+# --------------------------------------------------------------------------
+# capacidade: Capacidade Instalada de Geracao -- one live snapshot, no year
+# partitioning. One row per plant (== per ceg here; the real file is one row
+# per generating *unit*, several of which can share a ceg, but a single mock
+# row summing to the target capacity exercises the same downstream grouping
+# in agg_capacidade without needing to fake sub-unit splits too).
+# capacity_mw is sized off each plant's own mock generation share so
+# utilization comes out in a plausible ~40-70% range rather than either
+# saturating at 100% or reading as barely-used.
+# --------------------------------------------------------------------------
+crows = []
+for nom, sub, fuel, w in PLANTS:
+    peak_mw = 40000 * 0.16 * w
+    capacity_mw = max(15.0, round(peak_mw / 0.55, 1))
+    crows.append({
+        "id_subsistema": sub, "nom_usina": nom, "ceg": CEGS[(sub, nom)],
+        "nom_tipousina": "TÉRMICA", "nom_combustivel": fuel,
+        "dat_entradateste": "2015-01-01", "dat_entradaoperacao": "2015-06-01",
+        "dat_desativacao": "", "val_potenciaefetiva": capacity_mw,
+    })
+d = RAW / "capacidade"; d.mkdir(parents=True, exist_ok=True)
+pd.DataFrame(crows).to_parquet(d / "CAPACIDADE_GERACAO.parquet", index=False)
+print(f"mock capacidade written ({len(crows)} plants, "
+      f"{len(SPLIT_PLANTS)} mocked as combined-cycle)")

@@ -21,6 +21,11 @@ Datasets pulled (all from https://dados.ons.org.br, CC-BY):
             level and usable volume %; bulletin sheets 23-26). Also the source
             of the REE -> subsystem crosswalk `ear_ree` needs, since the REE
             file itself carries no subsystem column.
+  capacidade Capacidade Instalada de Geracao       (live snapshot, no history:
+            per-generating-unit nameplate MW. Joined to `termica` by CEG
+            (ANEEL venture ID) to give each thermal plant an installed
+            capacity, from which utilization % and an estimated natural-gas
+            m3/day figure are derived -- see attach_capacity().)
   geracao   Geracao por Usina em Base Horaria    (optional, large; only needed if
             you want fuel splits over the full plant universe)
 
@@ -79,6 +84,33 @@ SUBSYSTEMS = {
 GAS_FUELS = {"gas natural", "gnl", "lng", "gas de processo", "gas industrial",
              "gas de refinaria", "gas natural liquefeito"}
 
+# --------------------------------------------------------------------------
+# Natural-gas consumption assumption
+#
+# ONS does not publish per-plant heat rate (thermal efficiency) anywhere in
+# its open data -- confirmed by inspecting the Capacidade Instalada de
+# Geracao and CVU das Usinas Termicas datasets directly (2026-08-25): CVU
+# das Usinas Termicas gives R$/MWh, a variable *cost*, not a physical fuel
+# consumption rate, and there's no public per-plant efficiency figure to
+# back one out of it (the fuel price ONS assumed per plant isn't published
+# alongside it). So this is a genuine assumption, not a sourced figure --
+# flagged as a limitation in the dashboard footer and to the user directly.
+#
+# Rather than one blanket number for every gas plant, the two heat rates
+# below (typical figures for the two dominant gas-turbine configurations,
+# per general power-plant engineering references) are assigned using a
+# real structural signal already in ONS's own dispatch data: plants ONS
+# dispatches as multiple named phases under one ANEEL venture (CEG) --
+# e.g. "Maranhao 4 P0/P1/P2" -- are combined-cycle blocks (gas turbine +
+# heat-recovery steam turbine phases dispatched separately); a CEG
+# dispatched as a single entity is treated as simple/open-cycle. This
+# heuristic is inferred from dispatch structure, not a published cycle-type
+# field, and will misclassify a single-entity CEG that is itself a unified
+# combined-cycle block -- another flagged limitation.
+NATGAS_KCAL_PER_M3 = 9400.0          # Brazil industry-standard PCS, per user
+HEAT_RATE_COMBINED_CYCLE = 1800.0    # kcal/kWh, typical CCGT (~46% efficiency)
+HEAT_RATE_SIMPLE_CYCLE = 2500.0      # kcal/kWh, typical OCGT (~34% efficiency)
+
 
 # --------------------------------------------------------------------------
 # Source definitions
@@ -96,6 +128,11 @@ class Source:
     parquet_from: int = 2021         # earliest year with a .parquet resource
     first_year: int = 2000
     formats: tuple[str, ...] = ("parquet", "csv")
+    # A "live current snapshot" dataset (ONS: "nao possuem informacoes
+    # historicas") rather than a year/month-partitioned time series -- one
+    # file, always the latest, re-downloaded fresh on every fetch regardless
+    # of --years. So far only Capacidade Instalada de Geracao.
+    snapshot: bool = False
 
 
 SOURCES: dict[str, Source] = {
@@ -170,11 +207,33 @@ SOURCES: dict[str, Source] = {
         s3_dir="dados_hidrologicos_di",
         stem=lambda y, m: f"DADOS_HIDROLOGICOS_RES_{y}",
     ),
+    # Capacidade Instalada de Geracao: per-generating-unit installed capacity
+    # (val_potenciaefetiva, MW), one live snapshot file, no year partitioning
+    # -- "Estes dados nao possuem informacoes historicas. Os dados sao lidos
+    # de suas origens e atualizado diariamente." Confirmed via Chrome against
+    # https://dados.ons.org.br/dataset/capacidade-geracao and its JSON data
+    # dictionary on 2026-08-25: columns include id_subsistema, nom_usina,
+    # ceg, nom_tipousina, nom_combustivel, dat_desativacao,
+    # val_potenciaefetiva. `ceg` (the ANEEL venture ID) is the join key back
+    # to `termica` -- see attach_capacity() -- because `termica`'s own
+    # nom_usina is dispatch-phase granularity (a combined-cycle block can
+    # dispatch as several named phases, e.g. "Maranhao 4 P0/P1/P2", all one
+    # physical plant/CEG), while nom_usina in *this* file is the one true
+    # plant name per CEG.
+    "capacidade": Source(
+        key="capacidade",
+        label="Capacidade Instalada de Geracao",
+        s3_dir="capacidade-geracao",
+        stem=lambda y, m: "CAPACIDADE_GERACAO",
+        snapshot=True,
+    ),
 }
 
 
 def periods(src: Source, y0: int, y1: int) -> list[tuple[int, int | None]]:
     """Yield (year, month|None) file periods a source publishes over the range."""
+    if src.snapshot:
+        return [(y1, None)]  # one always-current file; the year is irrelevant
     out: list[tuple[int, int | None]] = []
     today = dt.date.today()
     for y in range(max(y0, src.first_year), y1 + 1):
@@ -619,7 +678,11 @@ def agg_geracao(paths: Iterable[Path], cache: Path | None = None) -> pd.DataFram
 # it must not gate whether a file's real numbers get used.
 TERMICA_REQUIRED = ["din_instante", "id_subsistema", "nom_usina",
                     "val_proggeracao", "val_verifgeracao"]
-TERMICA_OPTIONAL = ["nom_combustivel"]
+# `ceg` (Codigo Unico do Empreendimento de Geracao, ANEEL's venture ID) is
+# optional for the same reason nom_combustivel is: present in current files,
+# absent from some older ones. It's the join key to the capacidade dataset
+# -- see attach_capacity().
+TERMICA_OPTIONAL = ["nom_combustivel", "ceg"]
 
 TERMICA_METRICS = {"val_proggeracao": "plant_prog",
                    "val_verifgeracao": "plant_verif"}
@@ -699,8 +762,10 @@ def agg_termica_file(path: Path) -> pd.DataFrame:
             continue
         chunk["nom_usina"] = chunk["nom_usina"].astype(str).str.strip()
         if "nom_combustivel" in chunk.columns:
-            fuels.append(chunk[["nom_usina", "id_subsistema",
-                                "nom_combustivel"]].drop_duplicates())
+            attr_cols = ["nom_usina", "id_subsistema", "nom_combustivel"]
+            if "ceg" in chunk.columns:
+                attr_cols.append("ceg")
+            fuels.append(chunk[attr_cols].drop_duplicates())
         # a plant appears once per hour, so the daily mean is a straight mean
         parts.append(
             chunk.groupby(["date", "id_subsistema", "nom_usina"], observed=True)[
@@ -722,12 +787,17 @@ def agg_termica_file(path: Path) -> pd.DataFrame:
 
     # plant -> fuel map travels alongside the values, as a tiny attribute
     # table -- empty when this particular file never had nom_combustivel.
-    fmap = pd.DataFrame(columns=["entity", "subsystem", "group"])
+    # `ceg` rides along the same way when the file has it; concat fills NaN
+    # for files/rows that don't, so a plant with any file carrying its ceg
+    # gets one (see cached_agg/agg_termica's drop_duplicates keep="last").
+    fmap = pd.DataFrame(columns=["entity", "subsystem", "group", "ceg"])
     if fuels:
         fmap = pd.concat(fuels, ignore_index=True).drop_duplicates(
             subset=["id_subsistema", "nom_usina"])
         fmap = fmap.rename(columns={"nom_usina": "entity", "id_subsistema": "subsystem",
                                     "nom_combustivel": "group"})
+        if "ceg" not in fmap.columns:
+            fmap["ceg"] = pd.NA
     return out[COLS], fmap
 
 
@@ -823,6 +893,175 @@ def agg_hidraulico(paths: Iterable[Path], cache: Path | None = None) -> pd.DataF
             subset=["subsystem", "entity"], keep="last")
         e["kind"] = "reservoir"
     return out, e
+
+
+# --------------------------------------------------------------------------
+# Capacidade Instalada de Geracao -> plant capacity, utilization, and
+# estimated natural-gas consumption
+#
+# One row per *generating unit* (a plant/CEG can have several), not per
+# plant -- val_potenciaefetiva is that unit's own nameplate MW. A plant's
+# installed capacity is the sum of its still-active units' potenciaefetiva,
+# grouped by `ceg` (dat_desativacao blank/NaT = active; a filled date means
+# the unit has been decommissioned and its capacity no longer counts).
+# --------------------------------------------------------------------------
+
+CAPACIDADE_COLS = ["id_subsistema", "nom_usina", "ceg", "nom_tipousina",
+                   "nom_combustivel", "dat_desativacao", "val_potenciaefetiva"]
+
+
+def agg_capacidade(paths: Iterable[Path]) -> pd.DataFrame:
+    """One row per CEG (ANEEL venture): total active capacity, MW.
+
+    Restricted to nom_tipousina == TERMICA -- capacity for hydro/wind/solar/
+    nuclear units is in the same file but this pipeline has no entity table
+    to attach it to. Returns columns: ceg, subsystem, plant_name, capacity_mw.
+    """
+    frames = []
+    for p in paths:
+        try:
+            df = norm_columns(read_table(p, columns=None))
+            missing = [c for c in CAPACIDADE_COLS if c not in df.columns]
+            if missing:
+                print(f"  ! {p.name}: missing {missing}; found {list(df.columns)}",
+                      file=sys.stderr)
+                continue
+            df = df[CAPACIDADE_COLS].copy()
+        except Exception as e:
+            print(f"  ! skipping {p.name}: {e}", file=sys.stderr)
+            continue
+        df = coerce_numeric(df, ["val_potenciaefetiva"], where=f"{p.name}: ")
+        is_term = df["nom_tipousina"].astype(str).map(lambda t: deaccent(t).startswith("term"))
+        df = df[is_term]
+        if df.empty:
+            continue
+        df["ceg"] = df["ceg"].astype(str).str.strip()
+        n_before = len(df)
+        df = df[df["ceg"].notna() & (df["ceg"] != "") & (df["ceg"] != "nan")]
+        if len(df) < n_before:
+            print(f"  ! {p.name}: {n_before - len(df):,} thermal generating unit(s) "
+                  f"with no ceg, dropped from capacity totals", file=sys.stderr)
+        # active = never decommissioned (blank/NaT dat_desativacao)
+        dat = df["dat_desativacao"].astype(str).str.strip()
+        active = dat.isin(["", "nan", "none", "nat", "null"]) | df["dat_desativacao"].isna()
+        n_decom = int((~active).sum())
+        if n_decom:
+            print(f"  . {p.name}: {n_decom:,} decommissioned generating unit(s) "
+                  f"excluded from capacity totals", file=sys.stderr)
+        df = df[active]
+        if df.empty:
+            continue
+        frames.append(df[["ceg", "id_subsistema", "nom_usina", "val_potenciaefetiva"]])
+    if not frames:
+        return pd.DataFrame(columns=["ceg", "subsystem", "plant_name", "capacity_mw"])
+    cat = pd.concat(frames, ignore_index=True)
+    g = cat.groupby("ceg", observed=True).agg(
+        capacity_mw=("val_potenciaefetiva", "sum"),
+        subsystem=("id_subsistema", "first"),
+        plant_name=("nom_usina", "first"),
+    ).reset_index()
+    g["subsystem"] = g["subsystem"].astype(str).str.strip().str.upper()
+    g["plant_name"] = g["plant_name"].astype(str).str.strip()
+    return g
+
+
+def attach_capacity(df: pd.DataFrame, ent: pd.DataFrame,
+                    cap: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Join capacity onto plant entities by CEG; roll up combined-cycle blocks.
+
+    `termica`'s dispatch entities are sometimes finer than the physical
+    plant: a combined-cycle block can be dispatched as several named phases
+    sharing one CEG (e.g. "Maranhao 4 P0/P1/P2"). Attaching that CEG's full
+    capacity to each phase individually would badly overstate how many MW
+    each phase alone represents, and understate the true combined-plant
+    utilization if only one phase is looked at. So:
+      - a CEG with exactly one dispatch entity gets its capacity attached
+        directly (the entity already *is* the whole plant);
+      - a CEG with multiple dispatch entities gets ONE new synthetic entity
+        (named after the capacity file's own plant name for that CEG, e.g.
+        "MARANHAO IV" rather than the phase-level "Maranhao 4 P0") carrying
+        the summed daily plant_prog/plant_verif across its phases plus the
+        real combined capacity; the original phase entities are left exactly
+        as they were (no capacity attached to them, so no misleading
+        per-phase utilization is shown).
+    Also assigns a heat_rate_kcal_per_kwh to every gas-fuel entity (existing
+    or newly synthesized) -- see HEAT_RATE_COMBINED_CYCLE/_SIMPLE_CYCLE.
+    """
+    ent = ent.copy()
+    for col in ("ceg", "capacity_mw", "heat_rate_kcal_per_kwh"):
+        if col not in ent.columns:
+            ent[col] = pd.NA
+
+    plants = ent[ent["kind"] == "plant"].copy()
+    if plants.empty or cap.empty:
+        print("  ! capacity: no plant entities or no capacity data to attach -- "
+              "utilization/gas-consumption will be unavailable", file=sys.stderr)
+        return df, ent
+
+    have_ceg = plants[plants["ceg"].notna() & (plants["ceg"].astype(str) != "")]
+    n_no_ceg = len(plants) - len(have_ceg)
+    if n_no_ceg:
+        print(f"  ! capacity: {n_no_ceg:,} plant entity(ies) have no ceg on file "
+              f"(older bulletins predate the column) -- no capacity/utilization "
+              f"for those", file=sys.stderr)
+
+    cap_by_ceg = cap.set_index("ceg")
+    new_rows, new_ents, matched_cegs = [], [], set()
+
+    for ceg, grp in have_ceg.groupby("ceg", observed=True):
+        if ceg not in cap_by_ceg.index:
+            continue
+        row = cap_by_ceg.loc[ceg]
+        capacity_mw = float(row["capacity_mw"])
+        subsystem = row["subsystem"]
+        plant_name = row["plant_name"]
+        matched_cegs.add(ceg)
+        fuel_group = grp["group"].iloc[0]
+        is_gas = classify_fuel("termica", fuel_group) == "thermal_gas"
+        heat_rate = (HEAT_RATE_COMBINED_CYCLE if len(grp) > 1
+                    else HEAT_RATE_SIMPLE_CYCLE) if is_gas else pd.NA
+
+        if len(grp) == 1:
+            idx = grp.index[0]
+            ent.loc[idx, "capacity_mw"] = capacity_mw
+            ent.loc[idx, "heat_rate_kcal_per_kwh"] = heat_rate
+            continue
+
+        # multi-phase CEG: synthesize one combined entity, sum its phases'
+        # daily plant_prog/plant_verif, leave the phase entities untouched.
+        phase_names = set(grp["entity"])
+        mask = (df["subsystem"] == subsystem) & df["entity"].isin(phase_names) \
+             & df["series"].isin(["plant_prog", "plant_verif"])
+        phased = df[mask]
+        if phased.empty:
+            continue
+        summed = (phased.groupby(["date", "series"], observed=True)["value"]
+                 .sum().reset_index())
+        summed["subsystem"], summed["entity"] = subsystem, plant_name
+        new_rows.append(summed[["date", "subsystem", "entity", "series", "value"]])
+        new_ents.append({"kind": "plant", "entity": plant_name, "subsystem": subsystem,
+                         "group": fuel_group, "ceg": ceg, "capacity_mw": capacity_mw,
+                         "heat_rate_kcal_per_kwh": heat_rate})
+
+    n_unmatched = len(set(have_ceg["ceg"]) - matched_cegs)
+    if n_unmatched:
+        print(f"  ! capacity: {n_unmatched:,} dispatching plant CEG(s) not found in "
+              f"the capacity file (deactivated/renamed?) -- no capacity for those",
+              file=sys.stderr)
+
+    n_combined = len(new_ents)
+    if n_combined:
+        print(f"  . capacity: {n_combined:,} combined-cycle plant(s) synthesized "
+              f"from multi-phase dispatch entities (their individual phases are "
+              f"kept as-is, without a capacity figure of their own)")
+        df = pd.concat([df, pd.concat(new_rows, ignore_index=True)], ignore_index=True)
+        ent = pd.concat([ent, pd.DataFrame(new_ents)], ignore_index=True)
+
+    n_gas_priced = int(ent.loc[ent["kind"] == "plant", "heat_rate_kcal_per_kwh"].notna().sum())
+    n_capacity = int(ent.loc[ent["kind"] == "plant", "capacity_mw"].notna().sum())
+    print(f"  capacity attached to {n_capacity:,} plant entities "
+          f"({n_gas_priced:,} gas-fired, with a heat-rate assumption)")
+    return df, ent
 
 
 def cached_agg(path: Path, fn, cache: Path | None, has_side: bool = False):
@@ -1142,6 +1381,7 @@ def normalize_balance(df: pd.DataFrame) -> pd.DataFrame:
 def build_store(raw: Path, out: Path, keys: list[str]) -> pd.DataFrame:
     parts: list[pd.DataFrame] = []
     entities: list[pd.DataFrame] = []
+    cap_lookup = pd.DataFrame()
     cache = out / "_cache"
     for key in keys:
         d = raw / key
@@ -1173,6 +1413,10 @@ def build_store(raw: Path, out: Path, keys: list[str]) -> pd.DataFrame:
             part, ent = agg_hidraulico(files, cache / "hidraulico")
             if not ent.empty:
                 entities.append(ent)
+        elif key == "capacidade":
+            cap_lookup = agg_capacidade(files)
+            print(f"  {len(cap_lookup):,} plant (CEG) capacity records")
+            continue  # not a date/subsystem/entity/series/value series
         else:
             continue
         parts.append(part)
@@ -1197,17 +1441,35 @@ def build_store(raw: Path, out: Path, keys: list[str]) -> pd.DataFrame:
             subset=["kind", "subsystem", "entity"], keep="last")
         ent_df["subsystem"] = ent_df["subsystem"].astype(str).str.strip().str.upper()
         ent_df["group"] = ent_df["group"].fillna("").astype(str).str.strip()
-        ent_df = ent_df[["kind", "entity", "subsystem", "group"]]
+        keep_cols = ["kind", "entity", "subsystem", "group"] + (
+            ["ceg"] if "ceg" in ent_df.columns else [])
+        ent_df = ent_df[keep_cols]
 
     # Prefer the bulletin's own thermal source for the fuel splits. Geracao por
     # Usina still works when `termica` is not in the run, but it is a much larger
-    # download and its plant universe is not the one sheet 09 reports on.
+    # download and its plant universe is not the one sheet 09 reports on. This
+    # MUST run on the original (phase-level) entities, before attach_capacity
+    # below adds synthetic combined-plant rows -- otherwise a combined-cycle
+    # plant's generation would be summed twice into the subsystem total (once
+    # per dispatch phase, again via the synthetic combined entity).
     fuel = fuel_split_from_plants(df, ent_df)
     if not fuel.empty:
         keep = ~df["series"].astype(str).str.startswith("thermal_")
         df = pd.concat([df[keep], fuel], ignore_index=True)
         print(f"  fuel splits derived from per-plant verified generation "
               f"({fuel['series'].nunique()} fuels)")
+
+    if not cap_lookup.empty:
+        df, ent_df = attach_capacity(df, ent_df, cap_lookup)
+    else:
+        print("  ! no capacity data available -- utilization/gas-consumption "
+              "will be unavailable (run with `capacidade` in --datasets)",
+              file=sys.stderr)
+        for col in ("capacity_mw", "heat_rate_kcal_per_kwh"):
+            if col not in ent_df.columns:
+                ent_df[col] = pd.NA
+    ent_df = ent_df[["kind", "entity", "subsystem", "group",
+                     "capacity_mw", "heat_rate_kcal_per_kwh"]]
 
     df = normalize_balance(df)
     df = df.sort_values(["series", "subsystem", "entity", "date"])
