@@ -387,8 +387,8 @@ h1{font-size:25px;margin:0;letter-spacing:-.01em}
 .tabs{display:flex;gap:4px;border-bottom:1px solid var(--ring);margin-bottom:14px}
 .tabs button{border:0;border-bottom:2px solid transparent;background:none;
   border-radius:0;padding:9px 14px;color:var(--text-2);font-weight:600;font-size:13.5px}
-.tabs button[aria-pressed=true]{color:var(--text-1);border-bottom-color:var(--accent);
-  background:none}
+.tabs button[aria-pressed=true]{color:#fff;background:var(--accent);
+  border-bottom-color:var(--accent);border-radius:6px 6px 0 0}
 .tabs button:hover{background:var(--wash)}
 .controls{display:flex;flex-wrap:wrap;gap:18px;align-items:flex-end}
 .ctl{display:flex;flex-direction:column;gap:6px}
@@ -547,7 +547,7 @@ const state = {
   table: false,
   slots: {subsystems:new Map(), plants:new Map(), reservoirs:new Map()},
   picked: {subsystems:[], plants:[], reservoirs:[]},
-  metrics: {plants:new Set(["plant_verif"]), reservoirs:new Set(["res_volutil_pct"])},
+  metrics: {plants:new Set(["plant_capacity_mw","plant_verif","plant_gas_m3"]), reservoirs:new Set(["res_volutil_pct"])},
   ents:    {plants:[], reservoirs:[]},      // selected entity names
   filter:  {plants:{region:"", group:"", q:""}, reservoirs:{region:"", group:"", q:""}},
 };
@@ -911,7 +911,7 @@ function buildEntityPicker(card){
   rsel.appendChild(new Option("All regions",""));
   regions.forEach(s=>rsel.appendChild(new Option(DATA.subsystemLabels[s], s)));
   rsel.value=f.region;
-  rsel.onchange=()=>{ f.region=rsel.value; renderEntityList(); renderCount(); };
+  rsel.onchange=()=>{ f.region=rsel.value; onFilterChange(); };
   rBox.appendChild(rsel); bar.appendChild(rBox);
 
   const groups=[...new Set(DATA.entities.filter(e=>e.kind===kind)
@@ -923,7 +923,7 @@ function buildEntityPicker(card){
     sel.appendChild(new Option(kind==="plant"?"All fuels":"All basins",""));
     groups.forEach(g=>sel.appendChild(new Option(g,g)));
     sel.value=f.group;
-    sel.onchange=()=>{ f.group=sel.value; renderEntityList(); renderCount(); };
+    sel.onchange=()=>{ f.group=sel.value; onFilterChange(); };
     gBox.appendChild(sel); bar.appendChild(gBox);
   }
 
@@ -932,7 +932,7 @@ function buildEntityPicker(card){
   const q=document.createElement("input");
   q.type="search"; q.placeholder=kind==="plant"?"plant name":"reservoir name";
   q.value=f.q;
-  q.oninput=()=>{ f.q=q.value; renderEntityList(); renderCount(); };
+  q.oninput=()=>{ f.q=q.value; onFilterChange(); };
   qBox.appendChild(q); bar.appendChild(qBox);
   card.appendChild(bar);
 
@@ -946,6 +946,22 @@ function buildEntityPicker(card){
 
   const list=el("div","entlist"); list.id="entlist"; card.appendChild(list);
   renderEntityList();
+}
+function applyTopNSelection(n){
+  picked().forEach(k=>releaseSlot(k));
+  const mset=[...state.metrics[state.view]];
+  const list=[];
+  entityRows().slice(0,n).forEach(e=>{
+    mset.map(m=>skey(m,e.subsystem,e.entity)).filter(exists)
+      .forEach(k=>{ claimSlot(k); list.push(k); });
+  });
+  state.picked[state.view]=list;
+}
+function onFilterChange(){
+  const f=state.filter[state.view];
+  if(f.region || f.group || f.q) applyTopNSelection(5);
+  else { picked().forEach(k=>releaseSlot(k)); state.picked[state.view]=[]; }
+  renderEntityList(); renderCount(); render();
 }
 function setFilteredSelection(on){
   const mset=[...state.metrics[state.view]];
@@ -2066,7 +2082,9 @@ async function boot(){
       }
     });
   };
-  seedEnts("plants","plant_verif",DATA.defaults.plant);
+  // Thermal Plants opens empty (Eric's call -- was 4 preselected gas plants);
+  // sorted by Name by default rather than left in insertion order.
+  sortState["entlist-plant"]={col:1,dir:"asc"};
   seedEnts("reservoirs","res_volutil_pct",DATA.defaults.reservoir);
 
   buildTabs(); buildPresets(); buildSmooth(); buildSubs(); updateSubsVisibility();
