@@ -26,6 +26,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      # secrets.* can't be referenced directly in a step's `if:` (not an
+      # allowed context there) -- surface it through env first, which is.
+      MIRROR_DEPLOY_KEY_SET: ${{ secrets.MIRROR_DEPLOY_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -92,14 +96,14 @@ jobs:
       # can fail the job (continue-on-error) -- the real site's build/deploy
       # must never depend on this mirror working.
       - name: Load mirror deploy key
-        if: ${{ secrets.MIRROR_DEPLOY_KEY != '' }}
+        if: ${{ env.MIRROR_DEPLOY_KEY_SET == 'true' }}
         continue-on-error: true
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.MIRROR_DEPLOY_KEY }}
 
       - name: Publish mirror copy
-        if: ${{ secrets.MIRROR_DEPLOY_KEY != '' }}
+        if: ${{ env.MIRROR_DEPLOY_KEY_SET == 'true' }}
         continue-on-error: true
         run: |
           git clone git@github.com:ons-dashboard/ons-dashboard.github.io.git mirror
