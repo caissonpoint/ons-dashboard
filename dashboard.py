@@ -294,7 +294,11 @@ def build_payload(df: pd.DataFrame, ent: pd.DataFrame) -> dict:
 
     ents = ent.fillna("").to_dict("records") if len(ent) else []
     return {
-        "generated": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
+        # Timezone-aware UTC so the dashboard's "last refreshed" timestamp
+        # (subtitle + footer) is unambiguous regardless of what machine/
+        # timezone produced the build (GitHub Actions runners vs. Eric's own
+        # local run_refresh.local.bat).
+        "generated": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "dates": [pd.Timestamp(d).strftime("%Y-%m-%d") for d in dates],
         "series": series,
         "entities": ents,
@@ -367,8 +371,17 @@ body{margin:0;background:var(--plane);color:var(--text-1);
 .wrap{max-width:1440px;margin:0 auto;padding:20px 20px 64px}
 header{display:flex;flex-wrap:wrap;gap:12px;align-items:baseline;
   justify-content:space-between;margin-bottom:14px}
-h1{font-size:20px;margin:0;letter-spacing:-.01em}
+h1{font-size:25px;margin:0;letter-spacing:-.01em}
 .sub{color:var(--text-2);font-size:13px}
+.sources{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0 0 14px}
+.sources-label{font-size:11px;text-transform:uppercase;letter-spacing:.06em;
+  color:var(--muted);font-weight:600;margin-right:2px}
+.sources a{font-size:11.5px;color:var(--text-2);text-decoration:none;
+  border:1px solid var(--ring);border-radius:999px;padding:3px 10px;white-space:nowrap}
+.sources a:hover{background:var(--wash);color:var(--text-1);border-color:var(--axis)}
+.iconBtn{display:inline-flex;align-items:center;justify-content:center;
+  padding:5px 9px;line-height:0}
+.iconBtn svg{width:16px;height:16px;display:block}
 .card{background:var(--surface-1);border:1px solid var(--ring);border-radius:10px;
   padding:14px 16px;margin-bottom:14px}
 .tabs{display:flex;gap:4px;border-bottom:1px solid var(--ring);margin-bottom:14px}
@@ -460,10 +473,22 @@ table.data thead th.sortable:hover{background:var(--wash)}
     <div class="sub" id="subtitle">Loading&hellip;</div>
   </div>
   <div class="row">
-    <button id="themeBtn" title="Toggle light/dark">Theme</button>
+    <button id="themeBtn" class="iconBtn" title="Toggle light/dark" aria-label="Toggle light/dark"></button>
     <button id="csvBtn">Download CSV</button>
+    <button id="csvAllBtn">Export all data (Excel)</button>
   </div>
 </header>
+
+<div class="sources" id="sources">
+  <span class="sources-label">Data sources</span>
+  <a href="https://dados.ons.org.br/dataset/balanco-energia-subsistema" target="_blank" rel="noopener">Grid balances</a>
+  <a href="https://dados.ons.org.br/dataset/geracao-termica-despacho-2" target="_blank" rel="noopener">Thermal plants</a>
+  <a href="https://dados.ons.org.br/dataset/capacidade-geracao" target="_blank" rel="noopener">Installed capacity</a>
+  <a href="https://dados.ons.org.br/dataset/dados-hidrologicos-res" target="_blank" rel="noopener">Hydro reservoir levels</a>
+  <a href="https://dados.ons.org.br/dataset/ear-diario-por-subsistema" target="_blank" rel="noopener">Reservoir storage (EAR)</a>
+  <a href="https://dados.ons.org.br/dataset/ena-diario-por-subsistema" target="_blank" rel="noopener">Inflow energy (ENA)</a>
+  <a href="https://dados.ons.org.br/dataset/cmo-semi-horario" target="_blank" rel="noopener">Marginal cost (CMO)</a>
+</div>
 
 <div id="boot">Unpacking data&hellip;</div>
 <div id="app" hidden>
@@ -546,6 +571,25 @@ function isDark(){
 }
 const colorOf = (k, v) =>
   (isDark()?DATA.paletteDark:DATA.paletteLight)[claimSlot(k, v)];
+
+/* ---------- theme toggle icon (sun/moon rather than a text label) ---------- */
+const SUN_SVG='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '+
+  'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'+
+  '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41'+
+  'M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>'+
+  '</svg>';
+const MOON_SVG='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '+
+  'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'+
+  '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
+function paintThemeIcon(){
+  const btn=document.getElementById("themeBtn");
+  if(!btn) return;
+  const dark=isDark();
+  // Icon shows the mode a click switches TO (sun to go light, moon to go dark).
+  btn.innerHTML = dark ? SUN_SVG : MOON_SVG;
+  const label = dark ? "Switch to light mode" : "Switch to dark mode";
+  btn.title=label; btn.setAttribute("aria-label",label);
+}
 
 /* ---------- series keys: "<metric>|<subsystem>|<entity>" -------------------- */
 const skey = (m,s,e="") => m+"|"+s+"|"+e;
@@ -1214,6 +1258,255 @@ function downloadCSV(){
   a.click(); URL.revokeObjectURL(a.href);
 }
 
+/* ---------- export all data (xlsx, one sheet per dataset) ------------------
+   "Download CSV" above exports only the series currently plotted. This is
+   the complementary "give me everything" export -- every subsystem series,
+   every thermal plant, every reservoir, and the REE-level EAR data, each on
+   its own sheet, straight from the embedded payload (no server round-trip).
+   Built with a from-scratch, dependency-free XLSX writer (a hand-rolled
+   store-only ZIP plus the minimal OOXML parts Excel needs) rather than
+   pulling in a charting/spreadsheet library, since the whole point of this
+   dashboard is a single self-contained HTML file. ------------------------- */
+const CRC_TABLE=(()=>{
+  const t=new Uint32Array(256);
+  for(let n=0;n<256;n++){
+    let c=n;
+    for(let k=0;k<8;k++) c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1);
+    t[n]=c>>>0;
+  }
+  return t;
+})();
+function crc32(bytes){
+  let c=0xFFFFFFFF;
+  for(let i=0;i<bytes.length;i++) c=CRC_TABLE[(c^bytes[i])&0xFF]^(c>>>8);
+  return (c^0xFFFFFFFF)>>>0;
+}
+const zU16=v=>{ const b=new Uint8Array(2); b[0]=v&0xFF; b[1]=(v>>>8)&0xFF; return b; };
+const zU32=v=>{ const b=new Uint8Array(4); b[0]=v&0xFF; b[1]=(v>>>8)&0xFF;
+  b[2]=(v>>>16)&0xFF; b[3]=(v>>>24)&0xFF; return b; };
+function zConcat(arrs){
+  let total=0; arrs.forEach(a=>total+=a.length);
+  const out=new Uint8Array(total); let o=0;
+  arrs.forEach(a=>{ out.set(a,o); o+=a.length; });
+  return out;
+}
+async function deflateRaw(bytes){
+  const cs=new CompressionStream("deflate-raw");
+  const writer=cs.writable.getWriter();
+  writer.write(bytes); writer.close();
+  return new Uint8Array(await new Response(cs.readable).arrayBuffer());
+}
+async function makeZip(files){
+  // files: [{name, data:Uint8Array}]. Deflate-compressed via the browser's
+  // native CompressionStream (same "deflate-raw" primitive, same browser
+  // floor -- Chrome/Edge 80+, Firefox 113+, Safari 16.4+ -- as the
+  // DecompressionStream already required by unpack() above) rather than
+  // stored uncompressed: years of daily plant/reservoir rows are highly
+  // repetitive XML and compress 5-10x, which is the difference between a
+  // multi-hundred-MB download and a manageable one.
+  const localParts=[], centralParts=[]; let offset=0;
+  const dosTime=0, dosDate=0x21;   // fixed valid MS-DOS date; exact value is cosmetic
+  for(const f of files){
+    const nameBytes=new TextEncoder().encode(f.name);
+    const crc=crc32(f.data), uncompSize=f.data.length;
+    const compData=await deflateRaw(f.data);
+    const compSize=compData.length;
+    const localHeader=zConcat([
+      zU32(0x04034b50), zU16(20), zU16(0), zU16(8),
+      zU16(dosTime), zU16(dosDate),
+      zU32(crc), zU32(compSize), zU32(uncompSize),
+      zU16(nameBytes.length), zU16(0),
+      nameBytes
+    ]);
+    localParts.push(localHeader, compData);
+    const centralHeader=zConcat([
+      zU32(0x02014b50), zU16(20), zU16(20), zU16(0), zU16(8),
+      zU16(dosTime), zU16(dosDate),
+      zU32(crc), zU32(compSize), zU32(uncompSize),
+      zU16(nameBytes.length), zU16(0), zU16(0),
+      zU16(0), zU16(0), zU32(0),
+      zU32(offset),
+      nameBytes
+    ]);
+    centralParts.push(centralHeader);
+    offset += localHeader.length + compData.length;
+  }
+  const centralDir=zConcat(centralParts), centralOffset=offset;
+  const eocd=zConcat([
+    zU32(0x06054b50), zU16(0), zU16(0),
+    zU16(files.length), zU16(files.length),
+    zU32(centralDir.length), zU32(centralOffset),
+    zU16(0)
+  ]);
+  return zConcat([...localParts, centralDir, eocd]);
+}
+function xmlEsc(s){
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;").replace(/'/g,"&apos;");
+}
+function xlsxCol(n){
+  let s=""; while(n>0){ const m=(n-1)%26; s=String.fromCharCode(65+m)+s; n=Math.floor((n-1)/26); }
+  return s;
+}
+function sheetXml(rows){
+  let body="<sheetData>";
+  rows.forEach((row,ri)=>{
+    body+='<row r="'+(ri+1)+'">';
+    row.forEach((val,ci)=>{
+      if(val==null || val==="") return;
+      const ref=xlsxCol(ci+1)+(ri+1);
+      if(typeof val==="number" && isFinite(val))
+        body+='<c r="'+ref+'"><v>'+val+'</v></c>';
+      else
+        body+='<c r="'+ref+'" t="inlineStr"><is><t xml:space="preserve">'+
+          xmlEsc(val)+'</t></is></c>';
+    });
+    body+="</row>";
+  });
+  body+="</sheetData>";
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'+
+    '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'+
+    body+'</worksheet>';
+}
+async function buildWorkbookXlsxBlob(sheets){
+  const enc=s=>new TextEncoder().encode(s);
+  const files=[];
+  files.push({name:"[Content_Types].xml", data:enc(
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'+
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'+
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'+
+    '<Default Extension="xml" ContentType="application/xml"/>'+
+    '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'+
+    sheets.map((s,i)=>'<Override PartName="/xl/worksheets/sheet'+(i+1)+'.xml" '+
+      'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>').join("")+
+    '</Types>'
+  )});
+  files.push({name:"_rels/.rels", data:enc(
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'+
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'+
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'+
+    '</Relationships>'
+  )});
+  files.push({name:"xl/workbook.xml", data:enc(
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'+
+    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '+
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'+
+    '<sheets>'+sheets.map((s,i)=>'<sheet name="'+xmlEsc(s.name)+'" sheetId="'+(i+1)+
+      '" r:id="rId'+(i+1)+'"/>').join("")+'</sheets></workbook>'
+  )});
+  files.push({name:"xl/_rels/workbook.xml.rels", data:enc(
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'+
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'+
+    sheets.map((s,i)=>'<Relationship Id="rId'+(i+1)+'" '+
+      'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '+
+      'Target="worksheets/sheet'+(i+1)+'.xml"/>').join("")+
+    '</Relationships>'
+  )});
+  sheets.forEach((s,i)=>{
+    files.push({name:"xl/worksheets/sheet"+(i+1)+".xml", data:enc(sheetXml(s.rows))});
+  });
+  const zipBytes=await makeZip(files);
+  return new Blob([zipBytes], {type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
+}
+const r2 = v => (v==null || !isFinite(v)) ? null : Math.round(v*100)/100;
+function buildAllDataSheets(){
+  const dates=DATA.dates;
+  const sheets=[];
+
+  // ---- Subsystems: every SIN/SE/S/NE/N balance & hydrology series ----
+  const subMetrics=DATA.seriesOrder.filter(m=>!DATA.seriesMeta[m].kind);
+  const subs=["SIN","SE","S","NE","N"];
+  const subRows=[["Date","Subsystem"].concat(
+    subMetrics.map(m=>DATA.seriesMeta[m].label+" ("+DATA.seriesMeta[m].unit+")"))];
+  dates.forEach((d,i)=>{
+    subs.forEach(sub=>{
+      const vals=subMetrics.map(m=>{
+        const arr=DATA.series[skey(m,sub)];
+        return arr ? arr[i] : null;
+      });
+      if(vals.some(v=>v!=null)) subRows.push([d,sub].concat(vals));
+    });
+  });
+  sheets.push({name:"Subsystems", rows:subRows});
+
+  // ---- Thermal Plants: one row per plant per day it reported ----
+  const plantHead=["Date","Plant","Subsystem","Fuel/type","Installed capacity (MW)",
+    "Programmed (MWmed)","Verified (MWmed)","Deviation (%)","Utilization (%)",
+    "Est. gas consumption (m³)"];
+  const plantRows=[plantHead];
+  (DATA.entities||[]).filter(e=>e.kind==="plant").forEach(ent=>{
+    const sub=ent.subsystem, name=ent.entity;
+    const verifArr=DATA.series[skey("plant_verif",sub,name)];
+    if(!verifArr) return;
+    const progArr=DATA.series[skey("plant_prog",sub,name)];
+    const cap=numOrNull(ent.capacity_mw), hr=numOrNull(ent.heat_rate_kcal_per_kwh);
+    dates.forEach((d,i)=>{
+      const v=verifArr[i];
+      if(v==null) return;
+      const p=progArr?progArr[i]:null;
+      const desvio=(p==null||Math.abs(p)<1e-6)?null:r2(100*(v-p)/p);
+      const util=(cap==null||cap<=0)?null:r2(100*v/cap);
+      const gas=hr==null?null:r2(v*24*1000*hr/9400);
+      plantRows.push([d,name,sub,ent.group||"",cap,p,v,desvio,util,gas]);
+    });
+  });
+  sheets.push({name:"Thermal Plants", rows:plantRows});
+
+  // ---- Reservoirs: usable volume % and upstream level, per reservoir ----
+  const resRows=[["Date","Reservoir","Subsystem","Basin","Usable volume (%)",
+    "Upstream level (m)"]];
+  (DATA.entities||[]).filter(e=>e.kind==="reservoir").forEach(ent=>{
+    const sub=ent.subsystem, name=ent.entity;
+    const volArr=DATA.series[skey("res_volutil_pct",sub,name)];
+    const lvlArr=DATA.series[skey("res_level_m",sub,name)];
+    if(!volArr && !lvlArr) return;
+    dates.forEach((d,i)=>{
+      const vol=volArr?volArr[i]:null, lvl=lvlArr?lvlArr[i]:null;
+      if(vol==null && lvl==null) return;
+      resRows.push([d,name,sub,ent.group||"",vol,lvl]);
+    });
+  });
+  sheets.push({name:"Reservoirs", rows:resRows});
+
+  // ---- EAR by REE: finer-than-subsystem reservoir-equivalent storage ----
+  const reeRows=[["Date","REE","Subsystem","Stored (MWmês)","Capacity (MWmês)",
+    "% of capacity"]];
+  (DATA.entities||[]).filter(e=>e.kind==="ree").forEach(ent=>{
+    const sub=ent.subsystem, name=ent.entity;
+    const mwArr=DATA.series[skey("ear_ree_mwmes",sub,name)];
+    if(!mwArr) return;
+    const maxArr=DATA.series[skey("ear_ree_max_mwmes",sub,name)];
+    const pctArr=DATA.series[skey("ear_ree_pct",sub,name)];
+    dates.forEach((d,i)=>{
+      const mw=mwArr[i];
+      if(mw==null) return;
+      reeRows.push([d,name,sub,mw,maxArr?maxArr[i]:null,pctArr?pctArr[i]:null]);
+    });
+  });
+  sheets.push({name:"EAR by REE", rows:reeRows});
+
+  return sheets;
+}
+async function downloadAllXLSX(){
+  const btn=document.getElementById("csvAllBtn");
+  const prevLabel=btn.textContent;
+  btn.disabled=true; btn.textContent="Building…";
+  try{
+    // Yield a tick so the "Building…" state paints before the sheet
+    // assembly + compression (non-trivial for years of daily plant/
+    // reservoir data) runs.
+    await new Promise(r=>setTimeout(r,10));
+    const sheets=buildAllDataSheets();
+    const blob=await buildWorkbookXlsxBlob(sheets);
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(blob);
+    a.download="ons_all_data_"+DATA.dates[0]+"_"+DATA.dates[DATA.dates.length-1]+".xlsx";
+    a.click(); URL.revokeObjectURL(a.href);
+  } finally {
+    btn.disabled=false; btn.textContent=prevLabel;
+  }
+}
+
 function renderCount(){
   const c=document.getElementById("count");
   if(c) c.textContent=picked().length+" series selected · "
@@ -1703,7 +1996,7 @@ async function boot(){
   state.from=DATA.dates[Math.max(0,DATA.dates.length-366)];
 
   document.getElementById("subtitle").textContent =
-    "Brazilian grid balances · "+DATA.dates[0]+" to "+last+" · daily";
+    "Last refreshed "+DATA.generated;
   document.getElementById("foot").innerHTML =
     'Source: <a href="https://dados.ons.org.br" target="_blank" rel="noopener">ONS '+
     'Dados Abertos</a> (CC-BY). Balanço de Energia nos Subsistemas · Geração por '+
@@ -1728,7 +2021,10 @@ async function boot(){
     '9,400 kcal/m³ for natural gas (Brazil’s standard calorific value). A plant '+
     'whose CEG could not be matched (older bulletins predate the ceg column, or the '+
     'plant has since been deactivated/renamed) shows no capacity, utilization, or '+
-    'gas-consumption figure. Built '+DATA.generated+'.';
+    'gas-consumption figure. Built '+DATA.generated+'.<br>'+
+    '© '+new Date().getFullYear()+' GasBrazil.com. Data via ONS Dados Abertos '+
+    '(CC-BY) &mdash; see the sources above for the underlying datasets. Questions '+
+    'or feedback: <a href="mailto:eb@gasbrazil.com">eb@gasbrazil.com</a>.';
 
   ["from","to"].forEach(id=>{
     const inp=document.getElementById(id);
@@ -1740,9 +2036,11 @@ async function boot(){
     e.target.setAttribute("aria-pressed",String(state.table)); renderTable();
   };
   document.getElementById("csvBtn").onclick=downloadCSV;
+  document.getElementById("csvAllBtn").onclick=downloadAllXLSX;
+  paintThemeIcon();
   document.getElementById("themeBtn").onclick=()=>{
     document.documentElement.dataset.theme = isDark() ? "light" : "dark";
-    buildPickCard(); render();
+    paintThemeIcon(); buildPickCard(); render();
   };
   let rz; window.addEventListener("resize",()=>{
     clearTimeout(rz); rz=setTimeout(renderCharts,140);
