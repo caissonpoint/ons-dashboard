@@ -79,6 +79,38 @@ jobs:
           python ons_pipeline.py dashboard --html site/index.html
           ls -la site/
 
+      # Fallback mirror: some visitors sit behind a corporate DNS/proxy filter
+      # that flags a brand-new custom domain like ons.gasbrazil.com as a
+      # "newly registered domain" and blocks it outright, regardless of
+      # content -- see the discussion with Eric, 2026-08-26. This publishes
+      # the same built page to a second, independent GitHub Pages site
+      # (ons-dashboard/ons-dashboard.github.io) that carries no custom domain
+      # of its own, purely as a fallback URL while the real domain's
+      # reputation catches up. Uses a deploy key scoped to only that one repo
+      # (MIRROR_DEPLOY_KEY secret) -- write access to nothing else. Both
+      # steps are skipped entirely if the secret isn't set yet, and neither
+      # can fail the job (continue-on-error) -- the real site's build/deploy
+      # must never depend on this mirror working.
+      - name: Load mirror deploy key
+        if: ${{ secrets.MIRROR_DEPLOY_KEY != '' }}
+        continue-on-error: true
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.MIRROR_DEPLOY_KEY }}
+
+      - name: Publish mirror copy
+        if: ${{ secrets.MIRROR_DEPLOY_KEY != '' }}
+        continue-on-error: true
+        run: |
+          git clone git@github.com:ons-dashboard/ons-dashboard.github.io.git mirror
+          cp site/index.html mirror/index.html
+          cd mirror
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          git diff --staged --quiet || git commit -m "sync $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
