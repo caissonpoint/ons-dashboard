@@ -1016,7 +1016,7 @@ function entityRows(){
     // deactivated CEG that never dispatched). A plant lacking capacity but
     // with real verified data (e.g. one phase of a combined-cycle block --
     // see attach_capacity in ons_pipeline.py) still stays visible.
-    .filter(e=> kind!=="plant" || e.capacity_mw!=null ||
+    .filter(e=> kind!=="plant" || numOrNull(e.capacity_mw)!=null ||
       lastNonNull(fullSeries(skey("plant_verif", e.subsystem, e.entity)))!=null)
     .filter(e=>!f.region || e.subsystem===f.region)
     .filter(e=>!f.group || e.group===f.group)
@@ -2151,7 +2151,14 @@ function plantsLatestIdx(ents){
 function renderPlantsKpis(host){
   const plants=realPlants();
   if(!plants.length) return;
-  const gasPlants=plants.filter(e=>isGasPlant(e.group));
+  // Fleet-wide totals only -- excludes a multi-phase combined-cycle
+  // CEG's original phase entities once their generation has been
+  // rolled into a synthesized combined entity (see attach_capacity in
+  // ons_pipeline.py), so a CEG is never summed twice. The entity-picker
+  // table (renderEntityList) is unaffected -- it still lists every
+  // phase individually with its own real generation figure.
+  const fleetPlants=plants.filter(e=>!e.rolled_up);
+  const gasPlants=fleetPlants.filter(e=>isGasPlant(e.group));
 
   const asOf=plantsLatestIdx(plants);
   if(asOf<0) return;
@@ -2180,7 +2187,7 @@ function renderPlantsKpis(host){
   });
 
   let thermalSum=0;
-  plants.forEach(e=>{
+  fleetPlants.forEach(e=>{
     const v=(DATA.series[skey("plant_verif",e.subsystem,e.entity)]||[])[asOf];
     if(v!=null) thermalSum+=v;
   });
