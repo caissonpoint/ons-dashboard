@@ -418,6 +418,19 @@ button[aria-pressed=true]{background:var(--accent);border-color:var(--accent);co
 .entlist table.data{font-size:12px}
 .entlist table.data th,.entlist table.data td{padding:5px 8px}
 .entlist th.l,.entlist td.l{text-align:left}
+.entlist tr.total-row{background:var(--wash)}
+.entlist tr.total-row td.l{font-weight:600}
+.entlist table.data th.th-metric{display:flex;align-items:center;
+  justify-content:flex-end;gap:3px}
+.colFilterBtn{border:0;background:none;padding:0;margin:0;font-size:10px;
+  line-height:1;color:var(--muted);cursor:pointer}
+.colFilterBtn:hover{color:var(--text-1);background:none}
+.colFilterBtn.active{color:var(--accent);font-weight:700}
+.colFilterPop{position:fixed;background:var(--surface-1);border:1px solid var(--ring);
+  border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.16);padding:8px;font-size:12px;
+  display:flex;flex-direction:column;gap:6px;z-index:60;min-width:180px}
+.colFilterPop button{font-size:12px;padding:4px 8px;text-align:left;width:100%}
+.colFilterPop .row input{width:64px}
 .tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px}
 .tile{background:var(--surface-1);border:1px solid var(--ring);border-radius:10px;
   padding:11px 13px}
@@ -552,6 +565,10 @@ const state = {
   metrics: {plants:new Set(["plant_capacity_mw","plant_verif","plant_gas_m3"]), reservoirs:new Set(["res_volutil_pct"])},
   ents:    {plants:[], reservoirs:[]},      // selected entity names
   filter:  {plants:{region:"", group:"", q:""}, reservoirs:{region:"", group:"", q:""}},
+  // Excel-style per-column quick filters on the entity-picker tables, keyed by
+  // metric id: {mode:"nonzero"|"zero"|"range", min, max}. Combines (AND) with
+  // the region/fuel/search filters above -- see passesColFilters().
+  colFilter: {plants:new Map(), reservoirs:new Map()},
 };
 const view = () => VIEWS.find(v=>v.id===state.view);
 const picked = () => state.picked[state.view];
@@ -622,8 +639,31 @@ function entityOf(sub,ent){
   return ENT_BY_KEY.get(sub+"|"+ent);
 }
 const numOrNull=v=> (typeof v==="number" && isFinite(v)) ? v : null;
+
+/* ---------- virtual "Total" rows (Thermal Plants tab) ----------------------
+   Five synthetic entities -- one per SIN/SE/S/NE/N -- injected into
+   DATA.entities client-side at boot (injectVirtualTotals) so Eric can chart
+   a subsystem's or the national network's total thermal generation/gas
+   consumption alongside individual plants, without leaving the Thermal
+   Plants tab or duplicating the Subsystems-tab picker. They're kind:"plant"
+   (so they show up in the existing plant entity list) flagged isTotal:true,
+   and carry no capacity_mw/heat_rate -- the metric mapping below routes
+   plant_verif/plant_gas_m3 to the real subsystem-level gen_thermal/
+   gas_consumption_m3 series; every other plant metric (Programmed,
+   Deviation, Installed capacity, Utilization) is simply not applicable and
+   renders blank via the same "–" convention phase-level plant entities
+   already use for a missing attribute. ---------------------------------- */
+const VIRTUAL_METRIC_MAP = {plant_verif:"gen_thermal", plant_gas_m3:"gas_consumption_m3"};
+function isVirtualTotal(s,e){
+  const ent=entityOf(s,e);
+  return !!(ent && ent.isTotal);
+}
 function exists(k){
   const [m,s,e]=k.split("|");
+  if(isVirtualTotal(s,e)){
+    const real=VIRTUAL_METRIC_MAP[m];
+    return real!==undefined && DATA.series[skey(real,s)]!==undefined;
+  }
   if(m==="plant_desvio_pct")
     return DATA.series[skey("plant_verif",s,e)]!==undefined
         && DATA.series[skey("plant_prog",s,e)]!==undefined;
@@ -666,7 +706,11 @@ function fullSeries(key){
   if(memo.has(tag)) return memo.get(tag);
   const [m,s,e]=key.split("|");
   let out;
-  if(m==="plant_desvio_pct"){
+  if(isVirtualTotal(s,e)){
+    const real=VIRTUAL_METRIC_MAP[m];
+    out = real!==undefined ? smoothed(DATA.series[skey(real,s)]||[])
+                            : new Array(DATA.dates.length).fill(null);
+  } else if(m==="plant_desvio_pct"){
     const v=smoothed(DATA.series[skey("plant_verif",s,e)]||[]);
     const p=smoothed(DATA.series[skey("plant_prog",s,e)]||[]);
     out=v.map((x,i)=>{
@@ -719,7 +763,14 @@ function cellSortValue(td){
 function sortTableRows(table,col,dir){
   const tbody=table.tBodies[0]; if(!tbody) return;
   const rows=[...tbody.rows];
-  rows.sort((ra,rb)=>{
+  // Rows flagged data-pinned="1" (currently: the 5 synthetic subsystem/SIN
+  // "Total" rows on the Thermal Plants tab -- see renderEntityList) stay
+  // fixed at the top regardless of sort column/direction; only the
+  // remaining rows are actually reordered. A no-op for every other table,
+  // none of which ever set data-pinned.
+  const pinned=rows.filter(r=>r.dataset.pinned==="1");
+  const rest=rows.filter(r=>r.dataset.pinned!=="1");
+  rest.sort((ra,rb)=>{
     const a=cellSortValue(ra.cells[col]), b=cellSortValue(rb.cells[col]);
     if(a==null && b==null) return 0;
     if(a==null) return 1;             // rows with no value in this column sort last
@@ -728,13 +779,24 @@ function sortTableRows(table,col,dir){
       ? a-b : String(a).localeCompare(String(b));
     return dir==="asc" ? cmp : -cmp;
   });
-  rows.forEach(r=>tbody.appendChild(r));
+  pinned.concat(rest).forEach(r=>tbody.appendChild(r));
 }
 function paintSortIndicators(table,id){
   const headRow=table.tHead && table.tHead.rows[table.tHead.rows.length-1];
   if(!headRow) return;
   const st=sortState[id];
   [...headRow.cells].forEach((th,i)=>{
+    // Entity-picker header cells wrap their label in a .th-label span
+    // (sibling to the per-column filter button, see makeColFilterBtn) so the
+    // sort arrow can be repainted without clobbering that button. Every
+    // other table's headers are plain text, handled the old way below.
+    const labelSpan=th.querySelector(".th-label");
+    if(labelSpan){
+      if(labelSpan.dataset.label===undefined) labelSpan.dataset.label=labelSpan.textContent;
+      const label=labelSpan.dataset.label;
+      labelSpan.textContent = label + (st && st.col===i ? (st.dir==="asc"?" ▲":" ▼") : "");
+      return;
+    }
     if(th.dataset.label===undefined) th.dataset.label=th.textContent;
     const label=th.dataset.label;
     if(!label){ th.textContent=""; return; }   // blank header (e.g. checkbox column)
@@ -870,19 +932,62 @@ function buildMetricPicker(card){
   });
 }
 
+function lastNonNull(arr){
+  for(let i=arr.length-1;i>=0;i--) if(arr[i]!=null) return arr[i];
+  return null;
+}
+/* ---------- Excel-style per-column quick filters ----------------------------
+   AND-combines with the Region/Fuel/Search filters above. Only enforced for
+   a metric that's currently a visible column (state.metrics[view]) -- toggling
+   a filtered metric's column off "pauses" its filter rather than deleting it,
+   so it silently re-applies if the column is turned back on. Reads the same
+   latest-value-per-entity a table cell shows (fullSeries' true last non-null),
+   so "non-zero only" matches what's on screen. Never applied to the pinned
+   virtual "Total" rows -- see entityRows(). ------------------------------- */
+function passesColFilters(e){
+  const cf=state.colFilter[state.view];
+  if(!cf.size) return true;
+  const mset=[...state.metrics[state.view]];
+  for(const [metric,f] of cf){
+    if(!f || !mset.includes(metric)) continue;
+    const last=lastNonNull(fullSeries(skey(metric,e.subsystem,e.entity)));
+    if(f.mode==="nonzero" && !(last!=null && last!==0)) return false;
+    if(f.mode==="zero" && !(last!=null && last===0)) return false;
+    if(f.mode==="range"){
+      if(last==null) return false;
+      if(f.min!=null && last<f.min) return false;
+      if(f.max!=null && last>f.max) return false;
+    }
+  }
+  return true;
+}
+function anyEntityFilterActive(){
+  const f=state.filter[state.view];
+  return !!(f.region || f.group || f.q || state.colFilter[state.view].size);
+}
 function entityRows(){
   const kind=view().kind;
   const f=state.filter[state.view];
   const chosen=new Set(picked().map(k=>{const a=k.split("|");return a[1]+"|"+a[2];}));
-  return DATA.entities.filter(e=>e.kind===kind)
+  const all=DATA.entities.filter(e=>e.kind===kind);
+  // The 5 synthetic subsystem/SIN "Total" rows (Thermal Plants tab only) are
+  // pinned at the top of the list and bypass Region/Fuel/Search/column
+  // filters entirely -- they're not a "plant" in the filtered sense, and
+  // should stay easy to find regardless of what the plant list is scoped to.
+  // (They still participate in click-to-sort -- see the pinning logic in
+  // sortTableRows -- just not in these upstream filters.)
+  const pin = kind==="plant" ? all.filter(e=>e.isTotal) : [];
+  const rest = (kind==="plant" ? all.filter(e=>!e.isTotal) : all)
     .filter(e=>!f.region || e.subsystem===f.region)
     .filter(e=>!f.group || e.group===f.group)
     .filter(e=>!f.q || e.entity.toLowerCase().includes(f.q.toLowerCase()))
+    .filter(passesColFilters)
     .sort((a,b)=>{
       const sa=chosen.has(a.subsystem+"|"+a.entity)?0:1;
       const sb=chosen.has(b.subsystem+"|"+b.entity)?0:1;
       return sa-sb || a.entity.localeCompare(b.entity);
     });
+  return pin.concat(rest);
 }
 function buildEntityPicker(card){
   const kind=view().kind;
@@ -916,7 +1021,7 @@ function buildEntityPicker(card){
   rsel.onchange=()=>{ f.region=rsel.value; onFilterChange(); };
   rBox.appendChild(rsel); bar.appendChild(rBox);
 
-  const groups=[...new Set(DATA.entities.filter(e=>e.kind===kind)
+  const groups=[...new Set(DATA.entities.filter(e=>e.kind===kind && !e.isTotal)
     .map(e=>e.group).filter(Boolean))].sort();
   if(groups.length){
     const gBox=el("div","ctl");
@@ -938,7 +1043,7 @@ function buildEntityPicker(card){
   qBox.appendChild(q); bar.appendChild(qBox);
   card.appendChild(bar);
 
-  const filtered = f.region || f.group || f.q;
+  const filtered = anyEntityFilterActive();
   const selRow=el("div","row"); selRow.style.margin="10px 0 2px";
   const allBtn=el("button",null,"Select all"+(filtered?" (filtered)":""));
   allBtn.onclick=()=>{ setFilteredSelection(true); };
@@ -953,17 +1058,25 @@ function applyTopNSelection(n){
   picked().forEach(k=>releaseSlot(k));
   const mset=[...state.metrics[state.view]];
   const list=[];
-  entityRows().slice(0,n).forEach(e=>{
+  // Exclude the pinned virtual "Total" rows from the top-N auto-select --
+  // they're always visible regardless of filters, so they shouldn't crowd
+  // out real plants from a filter-driven top-5 pick.
+  entityRows().filter(e=>!e.isTotal).slice(0,n).forEach(e=>{
     mset.map(m=>skey(m,e.subsystem,e.entity)).filter(exists)
       .forEach(k=>{ claimSlot(k); list.push(k); });
   });
   state.picked[state.view]=list;
 }
 function onFilterChange(){
-  const f=state.filter[state.view];
-  if(f.region || f.group || f.q) applyTopNSelection(5);
+  if(anyEntityFilterActive()) applyTopNSelection(5);
   else { picked().forEach(k=>releaseSlot(k)); state.picked[state.view]=[]; }
   renderEntityList(); renderCount(); render();
+}
+function setColFilter(metric, filterOrNull){
+  if(filterOrNull) state.colFilter[state.view].set(metric, filterOrNull);
+  else state.colFilter[state.view].delete(metric);
+  closeColFilterPopover();
+  onFilterChange();
 }
 function setFilteredSelection(on){
   const mset=[...state.metrics[state.view]];
@@ -973,7 +1086,73 @@ function setFilteredSelection(on){
   });
   buildPickCard(); render();
 }
+/* ---------- per-column filter popover (Excel-style AutoFilter) ------------
+   One small "▾" button per numeric metric column header in the entity-
+   picker table (renderEntityList, below), opening a tiny popover with quick
+   non-zero/zero shortcuts plus a min/max range. Deliberately built as a
+   floating document.body element rather than nested inside the table so it
+   isn't clipped by .entlist's own overflow:auto scroll box. ---------------*/
+let openColFilterPopover=null;
+function closeColFilterPopover(){
+  if(openColFilterPopover){ openColFilterPopover.remove(); openColFilterPopover=null; }
+}
+document.addEventListener("click", closeColFilterPopover);
+function openColFilterPopoverFor(metric, anchorBtn){
+  const cur=state.colFilter[state.view].get(metric) || {};
+  const pop=el("div","colFilterPop");
+  pop.onclick=ev=>ev.stopPropagation();
+  const opt=(txt,mode)=>{
+    const b=el("button",null,txt);
+    b.onclick=()=>setColFilter(metric, {mode});
+    return b;
+  };
+  pop.appendChild(opt("Show non-zero only","nonzero"));
+  pop.appendChild(opt("Show zero only","zero"));
+  const rangeRow=el("div","row");
+  const minI=document.createElement("input");
+  minI.type="number"; minI.placeholder="Min";
+  if(cur.mode==="range" && cur.min!=null) minI.value=cur.min;
+  const maxI=document.createElement("input");
+  maxI.type="number"; maxI.placeholder="Max";
+  if(cur.mode==="range" && cur.max!=null) maxI.value=cur.max;
+  const applyBtn=el("button",null,"Apply range");
+  applyBtn.onclick=()=>{
+    const min=minI.value===""?null:parseFloat(minI.value);
+    const max=maxI.value===""?null:parseFloat(maxI.value);
+    if(min==null && max==null) return;
+    setColFilter(metric, {mode:"range", min, max});
+  };
+  rangeRow.append(minI,maxI,applyBtn);
+  pop.appendChild(rangeRow);
+  const clearBtn=el("button",null,"Clear filter");
+  clearBtn.onclick=()=>setColFilter(metric, null);
+  pop.appendChild(clearBtn);
+  document.body.appendChild(pop);
+  const r=anchorBtn.getBoundingClientRect();
+  pop.style.top=(r.bottom+4)+"px";
+  pop.style.left=Math.max(4,Math.min(window.innerWidth-pop.offsetWidth-8,
+    r.right-180))+"px";
+  openColFilterPopover=pop;
+}
+function makeColFilterBtn(metric){
+  const active=!!state.colFilter[state.view].get(metric);
+  const label=DATA.seriesMeta[metric].label;
+  const btn=el("button","colFilterBtn"+(active?" active":""),"▾");
+  btn.type="button";
+  btn.setAttribute("aria-label","Filter "+label);
+  btn.title=active ? "Filter active on "+label+" — click to change" : "Filter "+label;
+  btn.onclick=ev=>{
+    ev.stopPropagation();
+    const already=openColFilterPopover && openColFilterPopover.dataset.metric===metric;
+    closeColFilterPopover();
+    if(already) return;                 // second click on the same column: just close
+    openColFilterPopoverFor(metric, btn);
+    openColFilterPopover.dataset.metric=metric;
+  };
+  return btn;
+}
 function renderEntityList(){
+  closeColFilterPopover();
   const host=document.getElementById("entlist"); if(!host) return;
   host.innerHTML="";
   const rows=entityRows();
@@ -985,14 +1164,22 @@ function renderEntityList(){
   const htr=document.createElement("tr");
   htr.appendChild(el("th"));
   ["Name","Region",kind==="plant"?"Fuel":"Basin"].forEach(t=>htr.appendChild(el("th","l",t)));
-  mset.forEach(m=>htr.appendChild(el("th",null,DATA.seriesMeta[m].label)));
+  mset.forEach(m=>{
+    const th=document.createElement("th"); th.className="th-metric";
+    th.appendChild(el("span","th-label",DATA.seriesMeta[m].label));
+    th.appendChild(makeColFilterBtn(m));
+    htr.appendChild(th);
+  });
   thead.appendChild(htr); table.appendChild(thead);
   const tbody=document.createElement("tbody");
+  let realShown=0;
   rows.forEach(e=>{
     const keys=mset.map(m=>skey(m,e.subsystem,e.entity)).filter(exists);
     if(!keys.length) return;
+    if(!e.isTotal) realShown++;
     const on=keys.every(k=>picked().includes(k));
     const tr=document.createElement("tr");
+    if(e.isTotal){ tr.classList.add("total-row"); tr.dataset.pinned="1"; }
     const tdCb=el("td"); const cb=document.createElement("input");
     cb.type="checkbox"; cb.checked=on;
     cb.onchange=()=>{ keys.forEach(k=>toggleKey(k,cb.checked));
@@ -1008,8 +1195,7 @@ function renderEntityList(){
     tr.appendChild(el("td","l",e.group||"—"));
     mset.forEach(m=>{
       const k=skey(m,e.subsystem,e.entity);
-      const vals=fullSeries(k);
-      let last=null; for(let i=vals.length-1;i>=0;i--) if(vals[i]!=null){last=vals[i];break;}
+      const last=lastNonNull(fullSeries(k));
       tr.appendChild(el("td",null,fmtNum(last,decOf(k))));
     });
     tbody.appendChild(tr);
@@ -1017,6 +1203,10 @@ function renderEntityList(){
   table.appendChild(tbody);
   host.appendChild(table);
   makeSortable(table, "entlist-"+kind);
+  if(kind==="plant" && !realShown && rows.some(e=>e.isTotal)){
+    host.appendChild(el("div","empty",
+      "No individual plants match the current filters — showing subsystem/network totals only."));
+  }
 }
 function syncEntitySelection(){
   // when the metric toggles change, rebuild the picked list from the same entities
@@ -1452,7 +1642,11 @@ function buildAllDataSheets(){
     "Programmed (MWmed)","Verified (MWmed)","Deviation (%)","Utilization (%)",
     "Est. gas consumption (m³)"];
   const plantRows=[plantHead];
-  (DATA.entities||[]).filter(e=>e.kind==="plant").forEach(ent=>{
+  // Real plants only -- the 5 synthetic "Total" rows have no plant_verif
+  // series of their own (see VIRTUAL_METRIC_MAP) and would just be skipped
+  // below anyway; their numbers already appear in full on the Subsystems
+  // sheet above (gen_thermal / gas_consumption_m3, per subsystem and SIN).
+  realPlants().forEach(ent=>{
     const sub=ent.subsystem, name=ent.entity;
     const verifArr=DATA.series[skey("plant_verif",sub,name)];
     if(!verifArr) return;
@@ -1899,6 +2093,11 @@ function renderBasinSummary(host){
 
 /* ---------- Thermal Plants tab: gas KPI strip ---------------------------- */
 function isGasPlant(group){ return /g[aá]s/i.test(group||""); }
+// Real plants only -- excludes the 5 synthetic "Total" rows (isTotal), which
+// have no fuel group of their own and would otherwise silently skip every
+// sum below (their plant_verif/plant_prog keys don't exist as raw series --
+// see VIRTUAL_METRIC_MAP) rather than contribute anything meaningful.
+const realPlants = () => (DATA.entities||[]).filter(e=>e.kind==="plant" && !e.isTotal);
 function plantsLatestIdx(ents){
   let best=-1;
   ents.forEach(e=>{
@@ -1908,7 +2107,7 @@ function plantsLatestIdx(ents){
   return best;
 }
 function renderPlantsKpis(host){
-  const plants=(DATA.entities||[]).filter(e=>e.kind==="plant");
+  const plants=realPlants();
   if(!plants.length) return;
   const gasPlants=plants.filter(e=>isGasPlant(e.group));
 
@@ -2005,6 +2204,26 @@ async function unpack(){
   return JSON.parse(txt);
 }
 
+// Adds the 5 synthetic subsystem/SIN "Total" plant entities to DATA.entities
+// -- pure client-side wiring onto data (gen_thermal / gas_consumption_m3)
+// that's already in the payload for the Subsystems tab; no pipeline/payload
+// change needed. Must run before anything reads DATA.entities (entityOf/
+// ambiguous cache their lookups from it on first use), so it's called right
+// after unpack() succeeds, before any other boot step.
+function injectVirtualTotals(){
+  if(!Array.isArray(DATA.entities)) DATA.entities=[];
+  (DATA.subsystems||[]).forEach(sub=>{
+    DATA.entities.push({
+      kind: "plant",
+      entity: "Total — " + (DATA.subsystemLabels[sub] || sub),
+      subsystem: sub,
+      group: "— (fleet total)",
+      isTotal: true,
+      capacity_mw: null,
+      heat_rate_kcal_per_kwh: null,
+    });
+  });
+}
 async function boot(){
   try{ DATA=await unpack(); }
   catch(err){
@@ -2014,6 +2233,7 @@ async function boot(){
   }
   document.getElementById("boot").hidden=true;
   document.getElementById("app").hidden=false;
+  injectVirtualTotals();
 
   const last=DATA.dates[DATA.dates.length-1];
   state.to=last;

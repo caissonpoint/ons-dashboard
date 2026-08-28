@@ -30,6 +30,7 @@ jobs:
       # secrets.* can't be referenced directly in a step's `if:` (not an
       # allowed context there) -- surface it through env first, which is.
       MIRROR_DEPLOY_KEY_SET: ${{ secrets.MIRROR_DEPLOY_KEY != '' }}
+      GASBRAZIL_ONS_KEY_SET: ${{ secrets.GASBRAZIL_ONS_DEPLOY_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -109,6 +110,34 @@ jobs:
           git clone git@github.com:ons-dashboard/ons-dashboard.github.io.git mirror
           cp site/index.html mirror/index.html
           cd mirror
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          git diff --staged --quiet || git commit -m "sync $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push
+
+      # Second fallback mirror, same rationale as the ons-dashboard.github.io
+      # mirror above: publishes the same built page to gasbrazil/ons on the
+      # gasbrazil GitHub Pages account, reachable at gasbrazil.github.io/ons
+      # with no custom domain of its own -- part of consolidating the gas
+      # dashboards under one firewall-friendly gasbrazil.github.io hub
+      # (see gasbrazil/gasbrazil.github.io and gasbrazil/poc). Uses a deploy
+      # key scoped to only the gasbrazil/ons repo. Skipped entirely if the
+      # secret isn't set, and never fails the job.
+      - name: Load gasbrazil/ons mirror deploy key
+        if: ${{ env.GASBRAZIL_ONS_KEY_SET == 'true' }}
+        continue-on-error: true
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.GASBRAZIL_ONS_DEPLOY_KEY }}
+
+      - name: Publish to gasbrazil/ons
+        if: ${{ env.GASBRAZIL_ONS_KEY_SET == 'true' }}
+        continue-on-error: true
+        run: |
+          git clone git@github.com:gasbrazil/ons.git gasbrazil-ons
+          cp site/index.html gasbrazil-ons/index.html
+          cd gasbrazil-ons
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add index.html
