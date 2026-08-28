@@ -348,14 +348,14 @@ TEMPLATE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ONS Balances</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231a4fb4'/%3E%3Cpath d='M3 11.5 6 7l3 2.5L13 4' stroke='white' stroke-width='1.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%2303183D'/%3E%3Cpath d='M3 11.5 6 7l3 2.5L13 4' stroke='white' stroke-width='1.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
 __FONT_FACE__
 :root{
   color-scheme: light;
   --surface-1:#fcfcfb; --plane:#f4f4f1; --text-1:#0b0b0b; --text-2:#52514e;
   --muted:#898781; --grid:#e1e0d9; --axis:#c3c2b7; --ring:rgba(11,11,11,.10);
-  --accent:#1a4fb4; --wash:rgba(26,79,180,.08);
+  --accent:#03183D; --wash:rgba(3,24,61,.08);
 }
 /* Defaults to Light Mode regardless of the OS/browser color-scheme
    preference -- dark only applies when the visitor explicitly toggles it
@@ -364,7 +364,7 @@ __FONT_FACE__
   color-scheme: dark;
   --surface-1:#1a1a19; --plane:#0d0d0d; --text-1:#fff; --text-2:#c3c2b7;
   --muted:#898781; --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10);
-  --accent:#5083e0; --wash:rgba(80,131,224,.14);
+  --accent:#4a78c2; --wash:rgba(74,120,194,.16);
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--plane);color:var(--text-1);
@@ -548,6 +548,22 @@ const PALETTE_SIZE = 8;   // colour palette length -- selection itself is unlimi
 const CHART_MAX = 40;     // beyond this many picks, charts/tiles defer to the table
 const fmtNum = (v, d=0) => v==null||!isFinite(v) ? "–"
   : v.toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
+// Compact form for chart y-axis ticks only (tiles/table/tooltip keep the full
+// comma-grouped number via fmtNum) -- large series like estimated gas
+// consumption run into the tens of millions, where "10,000,000" is both hard
+// to scan and, when the selected range is nearly flat, prone to two
+// adjacent "nice" tick values (e.g. 29,999,999 and 30,000,000.5) rounding to
+// what looks like the same or an out-of-order label at 0-decimal precision.
+// Scaling to K/M/B first keeps enough precision (up to 1 decimal) to tell
+// close ticks apart, and reads as "30M" rather than a wall of zeros.
+const fmtAxisNum = (v, d=0) => {
+  if(v==null||!isFinite(v)) return "–";
+  const abs=Math.abs(v);
+  if(abs>=1e9) return (v/1e9).toLocaleString(undefined,{maximumFractionDigits:1})+"B";
+  if(abs>=1e6) return (v/1e6).toLocaleString(undefined,{maximumFractionDigits:1})+"M";
+  if(abs>=1e3) return (v/1e3).toLocaleString(undefined,{maximumFractionDigits:1})+"k";
+  return fmtNum(v,d);
+};
 
 /* ---------- views ---------------------------------------------------------- */
 const VIEWS = [
@@ -1324,7 +1340,7 @@ function drawPanel(unit,title,keys,W){
       stroke:"var(--grid)","stroke-width":1}));
     const lb=svgEl("text",{x:ML-9,y:y(t)+4,"text-anchor":"end",
       fill:"var(--muted)","font-size":11.5});
-    lb.textContent=fmtNum(t,decs);
+    lb.textContent=fmtAxisNum(t,decs);
     lb.style.fontVariantNumeric="tabular-nums"; svg.appendChild(lb);
   });
   if(lo<0&&hi>0) svg.appendChild(svgEl("line",{x1:ML,x2:W-MR,y1:y(0),y2:y(0),
@@ -2322,9 +2338,17 @@ async function boot(){
       }
     });
   };
-  // Thermal Plants opens empty (Eric's call -- was 4 preselected gas plants);
-  // sorted by Name by default rather than left in insertion order.
+  // Thermal Plants opens with the 5 subsystem/SIN "Total" rows pre-selected
+  // (Eric's call, 2026-08-28 -- supersedes the "opens empty" default from the
+  // 13th pass) so the fleet-wide totals chart by default; individual plants
+  // still start unchecked, and picking a Region/Fuel/Search filter still
+  // replaces the selection with that filter's top 5 (onFilterChange), same
+  // as before. Sorted by Name by default rather than left in insertion order.
   sortState["entlist-plant"]={col:1,dir:"asc"};
+  DATA.entities.filter(e=>e.kind==="plant" && e.isTotal).forEach(e=>{
+    [...state.metrics.plants].map(m=>skey(m,e.subsystem,e.entity)).filter(exists)
+      .forEach(k=>{ claimSlot(k,"plants"); state.picked.plants.push(k); });
+  });
   seedEnts("reservoirs","res_volutil_pct",DATA.defaults.reservoir);
 
   buildTabs(); buildPresets(); buildSmooth(); buildSubs(); updateSubsVisibility();
