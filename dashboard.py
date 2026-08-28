@@ -348,14 +348,14 @@ TEMPLATE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ONS Balances</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232a78d6'/%3E%3Cpath d='M3 11.5 6 7l3 2.5L13 4' stroke='white' stroke-width='1.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231a4fb4'/%3E%3Cpath d='M3 11.5 6 7l3 2.5L13 4' stroke='white' stroke-width='1.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
 __FONT_FACE__
 :root{
   color-scheme: light;
   --surface-1:#fcfcfb; --plane:#f4f4f1; --text-1:#0b0b0b; --text-2:#52514e;
   --muted:#898781; --grid:#e1e0d9; --axis:#c3c2b7; --ring:rgba(11,11,11,.10);
-  --accent:#2a78d6; --wash:rgba(42,120,214,.08);
+  --accent:#1a4fb4; --wash:rgba(26,79,180,.08);
 }
 /* Defaults to Light Mode regardless of the OS/browser color-scheme
    preference -- dark only applies when the visitor explicitly toggles it
@@ -364,7 +364,7 @@ __FONT_FACE__
   color-scheme: dark;
   --surface-1:#1a1a19; --plane:#0d0d0d; --text-1:#fff; --text-2:#c3c2b7;
   --muted:#898781; --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10);
-  --accent:#3987e5; --wash:rgba(57,135,229,.14);
+  --accent:#5083e0; --wash:rgba(80,131,224,.14);
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--plane);color:var(--text-1);
@@ -420,8 +420,9 @@ button[aria-pressed=true]{background:var(--accent);border-color:var(--accent);co
 .entlist th.l,.entlist td.l{text-align:left}
 .entlist tr.total-row{background:var(--wash)}
 .entlist tr.total-row td.l{font-weight:600}
-.entlist table.data th.th-metric{display:flex;align-items:center;
-  justify-content:flex-end;gap:3px}
+.entlist table.data th.th-metric{white-space:nowrap}
+.th-metric-inner{display:flex;align-items:center;justify-content:flex-end;
+  gap:3px}
 .colFilterBtn{border:0;background:none;padding:0;margin:0;font-size:10px;
   line-height:1;color:var(--muted);cursor:pointer}
 .colFilterBtn:hover{color:var(--text-1);background:none}
@@ -1166,8 +1167,10 @@ function renderEntityList(){
   ["Name","Region",kind==="plant"?"Fuel":"Basin"].forEach(t=>htr.appendChild(el("th","l",t)));
   mset.forEach(m=>{
     const th=document.createElement("th"); th.className="th-metric";
-    th.appendChild(el("span","th-label",DATA.seriesMeta[m].label));
-    th.appendChild(makeColFilterBtn(m));
+    const inner=el("span","th-metric-inner");
+    inner.appendChild(el("span","th-label",DATA.seriesMeta[m].label));
+    inner.appendChild(makeColFilterBtn(m));
+    th.appendChild(inner);
     htr.appendChild(th);
   });
   thead.appendChild(htr); table.appendChild(thead);
