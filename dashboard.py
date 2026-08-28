@@ -573,7 +573,7 @@ const VIEWS = [
 ];
 
 const state = {
-  view: "subsystems",
+  view: "plants",
   from: null, to: null, smooth: 1,
   subs: new Set(["SIN"]),
   table: false,
@@ -605,8 +605,24 @@ function isDark(){
   // visitor has explicitly toggled it via the Theme button.
   return document.documentElement.dataset.theme==="dark";
 }
-const colorOf = (k, v) =>
-  (isDark()?DATA.paletteDark:DATA.paletteLight)[claimSlot(k, v)];
+// Fixed, maximally-distinct colors for the 5 subsystem/SIN "Total" rows
+// (Thermal Plants tab). These bypass the generic claimSlot palette-cycling
+// below: claimSlot hands out one slot per *selected series*, and the 5
+// Total rows contribute 2 series each (Verified + Est. gas consumption) --
+// the 9th/10th series claimed wrapped back around the 8-color palette, so
+// Total SIN and Total North (claimed 1st and 9th) ended up the same color.
+// Fixing the color to the subsystem itself (rather than claim order) also
+// keeps a subsystem's two chart panels (MWmed, gas consumption) matched.
+const TOTAL_COLOR_LIGHT = {SIN:"#2a78d6", SE:"#1baf7a", S:"#eda100", NE:"#4a3aa7", N:"#e34948"};
+const TOTAL_COLOR_DARK  = {SIN:"#3987e5", SE:"#199e70", S:"#c98500", NE:"#9085e9", N:"#e66767"};
+const colorOf = (k, v) => {
+  const [,s,e] = k.split("|");
+  if(e!==undefined && isVirtualTotal(s,e)){
+    const pal = isDark()?TOTAL_COLOR_DARK:TOTAL_COLOR_LIGHT;
+    if(pal[s]) return pal[s];
+  }
+  return (isDark()?DATA.paletteDark:DATA.paletteLight)[claimSlot(k, v)];
+};
 
 /* ---------- theme toggle icon (sun/moon rather than a text label) ---------- */
 const SUN_SVG='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '+
@@ -670,7 +686,7 @@ const numOrNull=v=> (typeof v==="number" && isFinite(v)) ? v : null;
    Deviation, Installed capacity, Utilization) is simply not applicable and
    renders blank via the same "–" convention phase-level plant entities
    already use for a missing attribute. ---------------------------------- */
-const VIRTUAL_METRIC_MAP = {plant_verif:"gen_thermal", plant_gas_m3:"gas_consumption_m3"};
+const VIRTUAL_METRIC_MAP = {plant_verif:"gen_gas", plant_gas_m3:"gas_consumption_m3"};
 function isVirtualTotal(s,e){
   const ent=entityOf(s,e);
   return !!(ent && ent.isTotal);
@@ -995,6 +1011,13 @@ function entityRows(){
   // sortTableRows -- just not in these upstream filters.)
   const pin = kind==="plant" ? all.filter(e=>e.isTotal) : [];
   const rest = (kind==="plant" ? all.filter(e=>!e.isTotal) : all)
+    // Hide plants with neither a known installed capacity nor any actual
+    // verified generation ever reported -- pure noise (an unmatched or
+    // deactivated CEG that never dispatched). A plant lacking capacity but
+    // with real verified data (e.g. one phase of a combined-cycle block --
+    // see attach_capacity in ons_pipeline.py) still stays visible.
+    .filter(e=> kind!=="plant" || e.capacity_mw!=null ||
+      lastNonNull(fullSeries(skey("plant_verif", e.subsystem, e.entity)))!=null)
     .filter(e=>!f.region || e.subsystem===f.region)
     .filter(e=>!f.group || e.group===f.group)
     .filter(e=>!f.q || e.entity.toLowerCase().includes(f.q.toLowerCase()))
@@ -1664,7 +1687,7 @@ function buildAllDataSheets(){
   // Real plants only -- the 5 synthetic "Total" rows have no plant_verif
   // series of their own (see VIRTUAL_METRIC_MAP) and would just be skipped
   // below anyway; their numbers already appear in full on the Subsystems
-  // sheet above (gen_thermal / gas_consumption_m3, per subsystem and SIN).
+  // sheet above (gen_gas / gas_consumption_m3, per subsystem and SIN).
   realPlants().forEach(ent=>{
     const sub=ent.subsystem, name=ent.entity;
     const verifArr=DATA.series[skey("plant_verif",sub,name)];
@@ -2236,7 +2259,7 @@ function injectVirtualTotals(){
       kind: "plant",
       entity: "Total — " + (DATA.subsystemLabels[sub] || sub),
       subsystem: sub,
-      group: "— (fleet total)",
+      group: "Gas",
       isTotal: true,
       capacity_mw: null,
       heat_rate_kcal_per_kwh: null,
