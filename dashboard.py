@@ -380,6 +380,8 @@ h1{font-size:25px;margin:0;letter-spacing:-.01em}
 .sources a{font-size:11.5px;color:var(--text-2);text-decoration:none;
   border:1px solid var(--ring);border-radius:999px;padding:3px 10px;white-space:nowrap}
 .sources a:hover{background:var(--wash);color:var(--text-1);border-color:var(--axis)}
+.sources a.navlink{color:var(--accent);font-weight:600;border-color:var(--accent)}
+.sources a.navlink:hover{background:var(--accent);color:#fff}
 .iconBtn{display:inline-flex;align-items:center;justify-content:center;
   padding:5px 9px;line-height:0}
 .iconBtn svg{width:16px;height:16px;display:block}
@@ -496,6 +498,8 @@ table.data thead th.sortable:hover{background:var(--wash)}
 </header>
 
 <div class="sources" id="sources">
+  <a class="navlink" id="link-home" href="https://gasbrazil.com">&larr; GasBrazil.com</a>
+  <a class="navlink" id="link-poc" href="https://poc.gasbrazil.com">POC Results Dashboard &rarr;</a>
   <span class="sources-label">Data sources</span>
   <a href="https://dados.ons.org.br/dataset/balanco-energia-subsistema" target="_blank" rel="noopener">Grid balances</a>
   <a href="https://dados.ons.org.br/dataset/geracao-termica-despacho-2" target="_blank" rel="noopener">Thermal plants</a>
@@ -2273,6 +2277,38 @@ function injectVirtualTotals(){
     });
   });
 }
+// This same built HTML file is published to three places at once (custom
+// domain, the caissonpoint GitHub Pages URL, and the gasbrazil.github.io
+// hub mirror), so the "back to GasBrazil.com" / "other dashboard" links
+// can't be baked in at build time -- they're resolved from location.hostname
+// at view time so each copy links to its own equivalent siblings. Mirror
+// image of the same pattern added to the POC dashboard.
+const SITE_LINKS = {
+  home: {
+    custom: "https://gasbrazil.com",
+    caissonpoint: "https://caissonpoint.github.io/gasbrazil-com/",
+    hub: "https://gasbrazil.github.io/",
+  },
+  poc: {
+    custom: "https://poc.gasbrazil.com",
+    caissonpoint: "https://caissonpoint.github.io/poc-dashboard/",
+    hub: "https://gasbrazil.github.io/poc/",
+  },
+};
+
+function siteFlavor() {
+  const h = location.hostname;
+  if (h === "gasbrazil.github.io") return "hub";
+  if (h === "caissonpoint.github.io") return "caissonpoint";
+  return "custom"; // *.gasbrazil.com, and the safe default for anything else (local file, preview, etc.)
+}
+
+function initCrossLinks() {
+  const flavor = siteFlavor();
+  document.getElementById("link-home").href = SITE_LINKS.home[flavor];
+  document.getElementById("link-poc").href = SITE_LINKS.poc[flavor];
+}
+
 async function boot(){
   try{ DATA=await unpack(); }
   catch(err){
@@ -2340,6 +2376,7 @@ async function boot(){
   document.getElementById("csvBtn").onclick=downloadCSV;
   document.getElementById("csvAllBtn").onclick=downloadAllXLSX;
   paintThemeIcon();
+  initCrossLinks();
   document.getElementById("themeBtn").onclick=()=>{
     document.documentElement.dataset.theme = isDark() ? "light" : "dark";
     paintThemeIcon(); buildPickCard(); render();
