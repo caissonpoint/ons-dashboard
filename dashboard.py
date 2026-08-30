@@ -380,14 +380,17 @@ h1{font-size:25px;margin:0;letter-spacing:-.01em}
 .sources a{font-size:11.5px;color:var(--text-2);text-decoration:none;
   border:1px solid var(--ring);border-radius:999px;padding:3px 10px;white-space:nowrap}
 .sources a:hover{background:var(--wash);color:var(--text-1);border-color:var(--axis)}
-.sources a.navlink{color:var(--accent);font-weight:600;border-color:var(--accent)}
-.sources a.navlink:hover{background:var(--accent);color:#fff}
+.navlink{font-size:11.5px;color:var(--accent);text-decoration:none;font-weight:600;
+  border:1px solid var(--accent);border-radius:999px;padding:3px 10px;white-space:nowrap}
+.navlink:hover{background:var(--accent);color:#fff}
 .iconBtn{display:inline-flex;align-items:center;justify-content:center;
   padding:5px 9px;line-height:0}
 .iconBtn svg{width:16px;height:16px;display:block}
 .card{background:var(--surface-1);border:1px solid var(--ring);border-radius:10px;
   padding:14px 16px;margin-bottom:14px}
-.tabs{display:flex;gap:4px;border-bottom:1px solid var(--ring);margin-bottom:14px}
+.tabbar{display:flex;align-items:flex-end;justify-content:space-between;
+  flex-wrap:wrap;gap:10px;border-bottom:1px solid var(--ring);margin-bottom:14px}
+.tabs{display:flex;gap:4px}
 .tabs button{border:0;border-bottom:2px solid transparent;background:none;
   border-radius:0;padding:9px 14px;color:var(--text-2);font-weight:600;font-size:13.5px}
 .tabs button[aria-pressed=true]{color:#fff;background:var(--accent);
@@ -491,15 +494,13 @@ table.data thead th.sortable:hover{background:var(--wash)}
     <div class="sub" id="subtitle">Loading&hellip;</div>
   </div>
   <div class="row">
+    <a class="navlink" id="link-home" href="https://gasbrazil.com">&larr; GasBrazil.com</a>
+    <a class="navlink" id="link-poc" href="https://poc.gasbrazil.com">POC Results Dashboard &rarr;</a>
     <button id="themeBtn" class="iconBtn" title="Toggle light/dark" aria-label="Toggle light/dark"></button>
-    <button id="csvBtn">Download CSV</button>
-    <button id="csvAllBtn">Export all data (Excel)</button>
   </div>
 </header>
 
 <div class="sources" id="sources">
-  <a class="navlink" id="link-home" href="https://gasbrazil.com">&larr; GasBrazil.com</a>
-  <a class="navlink" id="link-poc" href="https://poc.gasbrazil.com">POC Results Dashboard &rarr;</a>
   <span class="sources-label">Data sources</span>
   <a href="https://dados.ons.org.br/dataset/balanco-energia-subsistema" target="_blank" rel="noopener">Grid balances</a>
   <a href="https://dados.ons.org.br/dataset/geracao-termica-despacho-2" target="_blank" rel="noopener">Thermal plants</a>
@@ -513,7 +514,13 @@ table.data thead th.sortable:hover{background:var(--wash)}
 <div id="boot">Unpacking data&hellip;</div>
 <div id="app" hidden>
 
-<div class="tabs" id="tabs"></div>
+<div class="tabbar">
+  <div class="tabs" id="tabs"></div>
+  <div class="row">
+    <button id="csvBtn">Download CSV</button>
+    <button id="csvAllBtn">Export all data (Excel)</button>
+  </div>
+</div>
 
 <div class="tiles" id="kpiTiles" style="margin-bottom:14px"></div>
 <div id="resSummary"></div>

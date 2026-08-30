@@ -991,6 +991,14 @@ def attach_capacity(df: pd.DataFrame, ent: pd.DataFrame,
     for col in ("ceg", "capacity_mw", "heat_rate_kcal_per_kwh"):
         if col not in ent.columns:
             ent[col] = pd.NA
+    if "rolled_up" not in ent.columns:
+        # True on a multi-phase CEG's original dispatch-phase entities
+        # once their generation has been summed into a synthesized
+        # combined entity below -- lets the dashboard exclude them from
+        # fleet-wide totals (they would otherwise be double-counted: once
+        # per phase, again via the combined entity) while still listing
+        # them individually in the entity picker.
+        ent["rolled_up"] = False
 
     plants = ent[ent["kind"] == "plant"].copy()
     if plants.empty or cap.empty:
@@ -1028,7 +1036,11 @@ def attach_capacity(df: pd.DataFrame, ent: pd.DataFrame,
             continue
 
         # multi-phase CEG: synthesize one combined entity, sum its phases'
-        # daily plant_prog/plant_verif, leave the phase entities untouched.
+        # daily plant_prog/plant_verif, leave the phase entities' own data
+        # untouched -- but flag them rolled_up so fleet-wide sums (built
+        # client-side from every plant entity) don't double-count them
+        # against the combined entity created below.
+        ent.loc[grp.index, "rolled_up"] = True
         phase_names = set(grp["entity"])
         mask = (df["subsystem"] == subsystem) & df["entity"].isin(phase_names) \
              & df["series"].isin(["plant_prog", "plant_verif"])
@@ -1041,7 +1053,7 @@ def attach_capacity(df: pd.DataFrame, ent: pd.DataFrame,
         new_rows.append(summed[["date", "subsystem", "entity", "series", "value"]])
         new_ents.append({"kind": "plant", "entity": plant_name, "subsystem": subsystem,
                          "group": fuel_group, "ceg": ceg, "capacity_mw": capacity_mw,
-                         "heat_rate_kcal_per_kwh": heat_rate})
+                         "heat_rate_kcal_per_kwh": heat_rate, "rolled_up": False})
 
     n_unmatched = len(set(have_ceg["ceg"]) - matched_cegs)
     if n_unmatched:
@@ -1465,11 +1477,15 @@ def build_store(raw: Path, out: Path, keys: list[str]) -> pd.DataFrame:
         print("  ! no capacity data available -- utilization/gas-consumption "
               "will be unavailable (run with `capacidade` in --datasets)",
               file=sys.stderr)
-        for col in ("capacity_mw", "heat_rate_kcal_per_kwh"):
+        for col in ("capacity_mw", "heat_rate_kcal_per_kwh", "rolled_up"):
             if col not in ent_df.columns:
-                ent_df[col] = pd.NA
+                ent_df[col] = False if col == "rolled_up" else pd.NA
+    # NOTE: this whitelist previously silently dropped any column attach_capacity
+    # added beyond these six (it already dropped `ceg` even before `rolled_up`
+    # existed) -- `rolled_up` has to be listed here explicitly or the dashboard
+    # payload never sees it, regardless of what attach_capacity computed.
     ent_df = ent_df[["kind", "entity", "subsystem", "group",
-                     "capacity_mw", "heat_rate_kcal_per_kwh"]]
+                     "capacity_mw", "heat_rate_kcal_per_kwh", "rolled_up"]]
 
     df = normalize_balance(df)
     df = df.sort_values(["series", "subsystem", "entity", "date"])
