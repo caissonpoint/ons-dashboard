@@ -498,6 +498,7 @@ table.data thead th.sortable:hover{background:var(--wash)}
   <div class="row">
     <a class="navlink" id="link-home" href="https://gasbrazil.com">&larr; GasBrazil.com</a>
     <a class="navlink" id="link-poc" href="https://poc.gasbrazil.com">POC Results Dashboard &rarr;</a>
+    <a class="navlink" href="wiki/">Wiki</a>
     <button id="refreshBtn" hidden>&#8635; Refresh data</button>
     <button id="themeBtn" class="iconBtn" title="Toggle light/dark" aria-label="Toggle light/dark"></button>
   </div>
