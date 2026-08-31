@@ -543,7 +543,6 @@ table.data thead th.sortable:hover{background:var(--wash)}
 
 <div class="card" id="pickCard"></div>
 
-<div class="tiles" id="tiles" style="margin-bottom:14px"></div>
 <div id="charts"></div>
 <div class="card" id="tableCard" hidden>
   <div class="scroll"><table class="data" id="dataTable"></table></div>
@@ -1284,17 +1283,14 @@ function syncEntitySelection(){
 
 /* ---------- stat tiles ----------------------------------------------------- */
 const decOf = k => ["%","R$/MWh","m"].includes(unitOf(k)) ? 1 : 0;
-function renderTiles(){
-  const host=document.getElementById("tiles"); host.innerHTML="";
-  if(picked().length>CHART_MAX){
-    host.innerHTML='<div class="card empty">'+picked().length+
-      ' series selected — stat tiles are hidden above '+CHART_MAX+
-      '. Switch on Table to see them all.</div>';
-    renderCount();
-    return;
-  }
+function buildTileEls(keys){
+  // Returns an array of stat-tile DOM elements for the given series keys --
+  // extracted from the old renderTiles() so a caller can render one tile
+  // row per unit panel (e.g. Verified tiles directly above the MWmed chart,
+  // Est. gas consumption tiles directly above the gas-consumption chart)
+  // instead of one single tile block for every picked series at once.
   const dates=windowDates();
-  picked().forEach(k=>{
+  return keys.map(k=>{
     // Walk the raw (null-preserving) window so we know which calendar date
     // the headline "last" value actually belongs to -- different series can
     // have different publish lags, so two tiles' "latest" numbers are not
@@ -1307,7 +1303,7 @@ function renderTiles(){
     const t=el("div","tile"), unit=unitOf(k), dec=decOf(k);
     if(lastIdx<0){
       t.innerHTML='<div class="nm">'+labelOf(k)+'</div><div class="big">–</div>';
-      host.appendChild(t); return;
+      return t;
     }
     const last=raw[lastIdx], lastDate=dates[lastIdx], first=v[0];
     const avg=v.reduce((a,b)=>a+b,0)/v.length;
@@ -1323,9 +1319,8 @@ function renderTiles(){
         'color:var(--text-2);font-weight:400">'+unit+'</span></div>'+
       '<div class="meta">as of '+lastDate+' · avg '+fmtNum(avg,dec)+' · min '+
         fmtNum(Math.min(...v),dec)+' · max '+fmtNum(Math.max(...v),dec)+chgTxt+'</div>';
-    host.appendChild(t);
+    return t;
   });
-  renderCount();
 }
 
 /* ---------- chart ---------------------------------------------------------- */
@@ -1521,21 +1516,31 @@ function renderCharts(){
     host.innerHTML='<div class="card empty">'+
       (view().kind? "Pick one or more from the list above."
                   : "Pick one or more series above.")+'</div>';
+    renderCount();
     return;
   }
   if(picked().length>CHART_MAX){
     host.innerHTML='<div class="card empty">'+picked().length+
       ' series selected — too many to chart clearly. Switch on Table below, '+
       'or narrow your Region/Fuel/search filters.</div>';
+    renderCount();
     return;
   }
   const W=Math.max(680, host.clientWidth-34);
+  // Each unit panel gets its own stat-tile row directly above its own chart
+  // -- e.g. the Verified (MWmed) tiles sit right above the MWmed chart, and
+  // the Est. gas consumption tiles sit right above the gas-consumption
+  // chart -- rather than one tile block followed by all the charts.
   DATA.unitPanels.forEach(p=>{
     const keys=picked().filter(k=>unitOf(k)===p.unit);
     if(!keys.length) return;
+    const tilesEl=el("div","tiles"); tilesEl.style.marginBottom="14px";
+    buildTileEls(keys).forEach(t=>tilesEl.appendChild(t));
+    host.appendChild(tilesEl);
     const c=drawPanel(p.unit,p.title,keys,W);
     if(c) host.appendChild(c);
   });
+  renderCount();
 }
 
 /* ---------- table + CSV ---------------------------------------------------- */
@@ -2330,7 +2335,7 @@ function renderPlantsKpis(host){
   }
 }
 
-function render(){ renderKpis(); renderTiles(); renderCharts(); renderTable(); }
+function render(){ renderKpis(); renderCharts(); renderTable(); }
 
 /* ---------- boot ----------------------------------------------------------- */
 async function unpack(){
