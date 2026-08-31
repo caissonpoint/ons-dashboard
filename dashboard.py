@@ -1426,16 +1426,32 @@ function drawPanel(unit,title,keys,W){
   svg.appendChild(hit);
 
   const tt=document.getElementById("tt");
+  // Within HOVER_PX vertical pixels of a line at the hovered date, the
+  // tooltip narrows to just that series (Eric's request: hovering "on" a
+  // line shouldn't bury it under every other series at that date). Outside
+  // that radius -- mouse over empty chart space, or a date with no line
+  // close by -- it falls back to the prior behavior of listing every
+  // plotted series for that date, so the tooltip stays useful for reading
+  // a whole day's values, not just line-picking.
+  const HOVER_PX=14;
   hit.addEventListener("pointermove",ev=>{
     const r=svg.getBoundingClientRect();
     const px=(ev.clientX-r.left)/r.width*W;
+    const py=(ev.clientY-r.top)/r.height*H;
     const i=Math.max(0,Math.min(dates.length-1,
       Math.round((px-ML)/(W-ML-MR)*(dates.length-1))));
     cross.setAttribute("x1",x(i)); cross.setAttribute("x2",x(i));
     cross.setAttribute("opacity",1);
+    let nearest=null,nearestDist=Infinity;
+    cols.forEach(c=>{
+      const v=c.vals[i]; if(v==null) return;
+      const dy=Math.abs(y(v)-py);
+      if(dy<nearestDist){nearestDist=dy; nearest=c;}
+    });
+    const focusCols=(nearest && nearestDist<=HOVER_PX) ? [nearest] : cols;
     dots.innerHTML=""; dots.setAttribute("opacity",1);
     let rows="";
-    cols.forEach(c=>{
+    focusCols.forEach(c=>{
       const v=c.vals[i]; if(v==null) return;
       dots.appendChild(svgEl("circle",{cx:x(i),cy:y(v),r:4,fill:c.color,
         stroke:"var(--surface-1)","stroke-width":2}));
