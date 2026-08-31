@@ -437,14 +437,14 @@ button[aria-pressed=true]{background:var(--accent);border-color:var(--accent);co
   display:flex;flex-direction:column;gap:6px;z-index:60;min-width:180px}
 .colFilterPop button{font-size:12px;padding:4px 8px;text-align:left;width:100%}
 .colFilterPop .row input{width:64px}
-.tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}
 .tile{background:var(--surface-1);border:1px solid var(--ring);border-radius:10px;
-  padding:11px 13px}
-.tile .nm{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text-2);
-  margin-bottom:4px}
-.tile .big{font-size:22px;font-weight:600;letter-spacing:-.02em;
+  padding:9px 11px}
+.tile .nm{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--text-2);
+  margin-bottom:3px}
+.tile .big{font-size:19px;font-weight:600;letter-spacing:-.02em;
   overflow-wrap:anywhere}
-.tile .meta{font-size:11.5px;color:var(--muted);margin-top:3px;
+.tile .meta{font-size:11px;color:var(--muted);margin-top:2px;
   font-variant-numeric:tabular-nums}
 .mix-bar{display:flex;height:14px;border-radius:4px;overflow:hidden;
   margin-top:7px;background:var(--grid)}
@@ -496,6 +496,7 @@ table.data thead th.sortable:hover{background:var(--wash)}
   <div class="row">
     <a class="navlink" id="link-home" href="https://gasbrazil.com">&larr; GasBrazil.com</a>
     <a class="navlink" id="link-poc" href="https://poc.gasbrazil.com">POC Results Dashboard &rarr;</a>
+    <button id="refreshBtn" hidden>&#8635; Refresh data</button>
     <button id="themeBtn" class="iconBtn" title="Toggle light/dark" aria-label="Toggle light/dark"></button>
   </div>
 </header>
@@ -1079,7 +1080,7 @@ function buildEntityPicker(card){
     gBox.appendChild(el("label",null,kind==="plant"?"Fuel":"Basin"));
     const sel=document.createElement("select");
     sel.appendChild(new Option(kind==="plant"?"All fuels":"All basins",""));
-    groups.forEach(g=>sel.appendChild(new Option(g,g)));
+    groups.forEach(g=>sel.appendChild(new Option(kind==="plant"?fuelLabelEN(g):g,g)));
     sel.value=f.group;
     sel.onchange=()=>{ f.group=sel.value; onFilterChange(); };
     gBox.appendChild(sel); bar.appendChild(gBox);
@@ -1245,7 +1246,7 @@ function renderEntityList(){
     tdName.appendChild(sw); tdName.appendChild(document.createTextNode(e.entity));
     tr.appendChild(tdName);
     tr.appendChild(el("td","l",DATA.subsystemLabels[e.subsystem]||e.subsystem));
-    tr.appendChild(el("td","l",e.group||"—"));
+    tr.appendChild(el("td","l",(kind==="plant"?fuelLabelEN(e.group):e.group)||"—"));
     mset.forEach(m=>{
       const k=skey(m,e.subsystem,e.entity);
       const last=lastNonNull(fullSeries(k));
@@ -1891,11 +1892,7 @@ function renderKpis(){
   if(maxSub!=null && maxVal>0){ flowLabel="Largest net exporter"; flowSub=maxSub; flowVal=maxVal; }
   else if(minSub!=null){ flowLabel="Largest net importer"; flowSub=minSub; flowVal=-minVal; }
 
-  host.appendChild(kpiTile("Latest available data", asOfDate, "",
-    lagDays>0
-      ? lagDays+" day"+(lagDays===1?"":"s")+" behind the most recent date in "+
-        "the store — ONS revises recent days after publication"
-      : "current through the newest published bulletin"));
+  host.appendChild(kpiTile("Latest available data", asOfDate, ""));
 
   host.appendChild(kpiTile("SIN load", fmtNum(loadV,0), "MWmed",
     "national balance · "+asOfDate));
@@ -1993,11 +1990,7 @@ function renderReservoirKpis(host, extra){
   const asOf=lastIdx(seriesArr("ear_pct","SIN"));
   if(asOf>=0){
     const lagDays=DATA.dates.length-1-asOf;
-    host.appendChild(kpiTile("Latest available data", DATA.dates[asOf], "",
-      lagDays>0
-        ? lagDays+" day"+(lagDays===1?"":"s")+" behind the most recent date in "+
-          "the store — ONS revises recent days after publication"
-        : "current through the newest published bulletin"));
+    host.appendChild(kpiTile("Latest available data", DATA.dates[asOf], ""));
   }
   const sin=earRow("SIN");
   if(sin && sin.pct!=null){
@@ -2146,6 +2139,49 @@ function renderBasinSummary(host){
 
 /* ---------- Thermal Plants tab: gas KPI strip ---------------------------- */
 function isGasPlant(group){ return /g[aá]s/i.test(group||""); }
+// Translates ONS's raw Portuguese fuel label (the "group" field, straight
+// from nom_combustivel -- see classify_fuel in ons_pipeline.py) to English
+// for display only. Matches common phrases/words as substrings so it holds
+// up against the many real-world label variants ONS uses (e.g. "Gás Natural
+// (Ciclo Combinado)"), longest phrases first so they win over a shorter
+// word contained within them. The underlying e.group value (used for
+// filtering/select matching) is left untouched -- this only changes what's
+// shown on screen. Falls back to the original string, partially translated
+// or verbatim, for anything not covered here rather than showing nothing.
+const FUEL_LABEL_EN=[
+  [/g[aá]s natural liquefeito/i,"Liquefied Natural Gas"],
+  [/g[aá]s natural/i,"Natural Gas"],
+  [/g[aá]s de processo/i,"Process Gas"],
+  [/g[aá]s de refinaria/i,"Refinery Gas"],
+  [/g[aá]s industrial/i,"Industrial Gas"],
+  [/bi[oó]g[aá]s/i,"Biogas"],
+  [/^g[aá]s$/i,"Gas"],
+  [/[oó]leo diesel/i,"Diesel Oil"],
+  [/[oó]leo combust[ií]vel/i,"Fuel Oil"],
+  [/[oó]leo/i,"Oil"],
+  [/carv[aã]o vegetal/i,"Charcoal"],
+  [/carv[aã]o mineral/i,"Coal"],
+  [/carv[aã]o/i,"Coal"],
+  [/ur[aâ]nio/i,"Uranium"],
+  [/nuclear/i,"Nuclear"],
+  [/bagaço de cana/i,"Sugarcane Bagasse"],
+  [/licor negro/i,"Black Liquor"],
+  [/cavaco de madeira/i,"Wood Chips"],
+  [/casca de arroz/i,"Rice Husk"],
+  [/capim elefante/i,"Elephant Grass"],
+  [/res[ií]duos industriais/i,"Industrial Waste"],
+  [/biomassa/i,"Biomass"],
+  [/ciclo combinado/i,"Combined Cycle"],
+  [/ciclo simples/i,"Simple Cycle"],
+  [/multi[- ]?combust[ií]vel/i,"Multi-fuel"],
+  [/outros/i,"Other"],
+];
+function fuelLabelEN(raw){
+  if(!raw) return raw;
+  let s=raw;
+  FUEL_LABEL_EN.forEach(([re,en])=>{ s=s.replace(re,en); });
+  return s;
+}
 // Real plants only -- excludes the 5 synthetic "Total" rows (isTotal), which
 // have no fuel group of their own and would otherwise silently skip every
 // sum below (their plant_verif/plant_prog keys don't exist as raw series --
@@ -2176,11 +2212,7 @@ function renderPlantsKpis(host){
   const asOfDate=DATA.dates[asOf];
   const lagDays=DATA.dates.length-1-asOf;
 
-  host.appendChild(kpiTile("Latest available data", asOfDate, "",
-    lagDays>0
-      ? lagDays+" day"+(lagDays===1?"":"s")+" behind the most recent date in "+
-        "the store — ONS revises recent days after publication"
-      : "current through the newest published bulletin"));
+  host.appendChild(kpiTile("Latest available data", asOfDate, ""));
 
   if(!gasPlants.length){
     host.appendChild(kpiTile("Gas-fired plants", "0", "",
@@ -2316,6 +2348,37 @@ function initCrossLinks() {
   document.getElementById("link-poc").href = SITE_LINKS.poc[flavor];
 }
 
+/* ---------- "Refresh data" button -----------------------------------------
+   This page is a static file with no backend of its own, so triggering the
+   refresh.yml GitHub Actions workflow means an authenticated call to
+   GitHub's API -- and a token that can do that must never live in this
+   page's own JS (anyone viewing a public page can read its source). Instead
+   this calls a small serverless proxy (a Cloudflare Worker) that holds the
+   GitHub token server-side and does the actual workflow_dispatch call; this
+   page only knows the Worker's public URL, which grants nothing on its own
+   beyond "kick off a rebuild." REFRESH_WORKER_URL is blank until that Worker
+   is deployed -- the button stays hidden until it's set, so an unconfigured
+   copy of this page (e.g. a fresh checkout) doesn't ship a broken button. */
+const REFRESH_WORKER_URL = "https://ons-refresh.eaabrooks.workers.dev/";
+async function triggerRefresh(){
+  const btn=document.getElementById("refreshBtn");
+  const prevLabel=btn.textContent;
+  btn.disabled=true; btn.textContent="Triggering…";
+  try{
+    const res=await fetch(REFRESH_WORKER_URL,{method:"POST"});
+    if(!res.ok) throw new Error("HTTP "+res.status);
+    btn.textContent="Triggered ✓";
+  }catch(err){
+    btn.textContent="Failed — try again";
+    console.error("Refresh trigger failed:",err);
+  }
+  // Stays disabled a while either way -- a real rebuild takes a couple
+  // minutes, and this avoids someone re-clicking a dozen times waiting for
+  // something to visibly change on this page (nothing will, until the next
+  // page load after the workflow finishes and redeploys).
+  setTimeout(()=>{ btn.disabled=false; btn.textContent=prevLabel; }, 60000);
+}
+
 async function boot(){
   try{ DATA=await unpack(); }
   catch(err){
@@ -2382,6 +2445,11 @@ async function boot(){
   };
   document.getElementById("csvBtn").onclick=downloadCSV;
   document.getElementById("csvAllBtn").onclick=downloadAllXLSX;
+  const refreshBtn=document.getElementById("refreshBtn");
+  if(REFRESH_WORKER_URL){
+    refreshBtn.hidden=false;
+    refreshBtn.onclick=triggerRefresh;
+  }
   paintThemeIcon();
   initCrossLinks();
   document.getElementById("themeBtn").onclick=()=>{
