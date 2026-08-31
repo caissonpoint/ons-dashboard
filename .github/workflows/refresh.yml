@@ -84,6 +84,15 @@ jobs:
           python ons_pipeline.py dashboard --html site/index.html
           ls -la site/
 
+      # Static wiki pages (Wiki/*.md -> site/wiki/*.html), linked from the
+      # dashboard's own "Wiki" header button. No data dependency -- pure
+      # documentation, rebuilt every run so it always matches whatever's in
+      # Wiki/ on main.
+      - name: Build the wiki pages
+        run: |
+          python build_wiki_site.py Wiki site/wiki
+          ls -la site/wiki/
+
       # Fallback mirror: some visitors sit behind a corporate DNS/proxy filter
       # that flags a brand-new custom domain like ons.gasbrazil.com as a
       # "newly registered domain" and blocks it outright, regardless of
@@ -109,10 +118,12 @@ jobs:
         run: |
           git clone git@github.com:ons-dashboard/ons-dashboard.github.io.git mirror
           cp site/index.html mirror/index.html
+          rm -rf mirror/wiki
+          cp -r site/wiki mirror/wiki
           cd mirror
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add index.html
+          git add index.html wiki
           git diff --staged --quiet || git commit -m "sync $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           git push
 
@@ -137,10 +148,12 @@ jobs:
         run: |
           git clone git@github.com:gasbrazil/ons.git gasbrazil-ons
           cp site/index.html gasbrazil-ons/index.html
+          rm -rf gasbrazil-ons/wiki
+          cp -r site/wiki gasbrazil-ons/wiki
           cd gasbrazil-ons
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add index.html
+          git add index.html wiki
           git diff --staged --quiet || git commit -m "sync $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           git push
 
