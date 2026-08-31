@@ -378,7 +378,9 @@ h1{font-size:25px;margin:0;letter-spacing:-.01em}
 .sources-label{font-size:11px;text-transform:uppercase;letter-spacing:.06em;
   color:var(--muted);font-weight:600;margin-right:2px}
 .sources a{font-size:11.5px;color:var(--text-2);text-decoration:none;
-  border:1px solid var(--ring);border-radius:999px;padding:3px 10px;white-space:nowrap}
+  border:1px solid var(--ring);border-radius:999px;padding:3px 10px;white-space:nowrap;
+  display:inline-flex;align-items:center;gap:4px}
+.ext-icon{width:10px;height:10px;display:inline-block;flex:none;opacity:.75}
 .sources a:hover{background:var(--wash);color:var(--text-1);border-color:var(--axis)}
 .navlink{font-size:11.5px;color:var(--accent);text-decoration:none;font-weight:600;
   border:1px solid var(--accent);border-radius:999px;padding:3px 10px;white-space:nowrap}
@@ -503,13 +505,13 @@ table.data thead th.sortable:hover{background:var(--wash)}
 
 <div class="sources" id="sources">
   <span class="sources-label">Data sources</span>
-  <a href="https://dados.ons.org.br/dataset/balanco-energia-subsistema" target="_blank" rel="noopener">Grid balances</a>
-  <a href="https://dados.ons.org.br/dataset/geracao-termica-despacho-2" target="_blank" rel="noopener">Thermal plants</a>
-  <a href="https://dados.ons.org.br/dataset/capacidade-geracao" target="_blank" rel="noopener">Installed capacity</a>
-  <a href="https://dados.ons.org.br/dataset/dados-hidrologicos-res" target="_blank" rel="noopener">Hydro reservoir levels</a>
-  <a href="https://dados.ons.org.br/dataset/ear-diario-por-subsistema" target="_blank" rel="noopener">Reservoir storage (EAR)</a>
-  <a href="https://dados.ons.org.br/dataset/ena-diario-por-subsistema" target="_blank" rel="noopener">Inflow energy (ENA)</a>
-  <a href="https://dados.ons.org.br/dataset/cmo-semi-horario" target="_blank" rel="noopener">Marginal cost (CMO)</a>
+  <a href="https://dados.ons.org.br/dataset/balanco-energia-subsistema" target="_blank" rel="noopener">Grid balances<svg class="ext-icon" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>
+  <a href="https://dados.ons.org.br/dataset/geracao-termica-despacho-2" target="_blank" rel="noopener">Thermal plants<svg class="ext-icon" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>
+  <a href="https://dados.ons.org.br/dataset/capacidade-geracao" target="_blank" rel="noopener">Installed capacity<svg class="ext-icon" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>
+  <a href="https://dados.ons.org.br/dataset/dados-hidrologicos-res" target="_blank" rel="noopener">Hydro reservoir levels<svg class="ext-icon" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>
+  <a href="https://dados.ons.org.br/dataset/ear-diario-por-subsistema" target="_blank" rel="noopener">Reservoir storage (EAR)<svg class="ext-icon" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>
+  <a href="https://dados.ons.org.br/dataset/ena-diario-por-subsistema" target="_blank" rel="noopener">Inflow energy (ENA)<svg class="ext-icon" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>
+  <a href="https://dados.ons.org.br/dataset/cmo-semi-horario" target="_blank" rel="noopener">Marginal cost (CMO)<svg class="ext-icon" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>
 </div>
 
 <div id="boot">Unpacking data&hellip;</div>
@@ -1426,29 +1428,38 @@ function drawPanel(unit,title,keys,W){
   svg.appendChild(hit);
 
   const tt=document.getElementById("tt");
-  // Within HOVER_PX vertical pixels of a line at the hovered date, the
-  // tooltip narrows to just that series (Eric's request: hovering "on" a
-  // line shouldn't bury it under every other series at that date). Outside
-  // that radius -- mouse over empty chart space, or a date with no line
-  // close by -- it falls back to the prior behavior of listing every
-  // plotted series for that date, so the tooltip stays useful for reading
-  // a whole day's values, not just line-picking.
+  // Click-to-reveal hover model (Eric's second proposal, replacing the
+  // auto-expand-after-delay idea): by default, hovering blank chart space
+  // shows nothing at all -- no popup, no crosshair. Hovering directly on a
+  // line (within HOVER_PX vertical pixels of it, at the hovered date)
+  // shows just that line's value, live, tracking the cursor -- unchanged
+  // from before. Clicking a spot that ISN'T on a line pins the full
+  // breakdown for that date (every plotted series at once); clicking the
+  // same pinned date again unpins it, clicking a different spot re-pins
+  // there, and leaving the chart clears the pin. This replaces the prior
+  // behavior of auto-showing every series the instant the cursor left a
+  // line, which visibly resized the tooltip table as the mouse moved.
   const HOVER_PX=14;
-  hit.addEventListener("pointermove",ev=>{
-    const r=svg.getBoundingClientRect();
-    const px=(ev.clientX-r.left)/r.width*W;
-    const py=(ev.clientY-r.top)/r.height*H;
-    const i=Math.max(0,Math.min(dates.length-1,
-      Math.round((px-ML)/(W-ML-MR)*(dates.length-1))));
-    cross.setAttribute("x1",x(i)); cross.setAttribute("x2",x(i));
-    cross.setAttribute("opacity",1);
+  let pinned=null; // date index of a click-pinned full-breakdown tooltip, or null
+
+  function nearestLineAt(i,py){
     let nearest=null,nearestDist=Infinity;
     cols.forEach(c=>{
       const v=c.vals[i]; if(v==null) return;
       const dy=Math.abs(y(v)-py);
       if(dy<nearestDist){nearestDist=dy; nearest=c;}
     });
-    const focusCols=(nearest && nearestDist<=HOVER_PX) ? [nearest] : cols;
+    return (nearest && nearestDist<=HOVER_PX) ? nearest : null;
+  }
+  function indexAt(ev){
+    const r=svg.getBoundingClientRect();
+    const px=(ev.clientX-r.left)/r.width*W;
+    return Math.max(0,Math.min(dates.length-1,
+      Math.round((px-ML)/(W-ML-MR)*(dates.length-1))));
+  }
+  function showTooltip(i,focusCols,clientX,clientY){
+    cross.setAttribute("x1",x(i)); cross.setAttribute("x2",x(i));
+    cross.setAttribute("opacity",1);
     dots.innerHTML=""; dots.setAttribute("opacity",1);
     let rows="";
     focusCols.forEach(c=>{
@@ -1462,12 +1473,33 @@ function drawPanel(unit,title,keys,W){
     tt.innerHTML='<div class="d">'+dates[i]+'</div><table>'+rows+'</table>';
     tt.style.display="block";
     const tw=tt.offsetWidth, th=tt.offsetHeight;
-    tt.style.left=Math.min(window.innerWidth-tw-12, ev.clientX+16)+"px";
-    tt.style.top=Math.min(window.innerHeight-th-12, Math.max(8,ev.clientY-th/2))+"px";
-  });
-  hit.addEventListener("pointerleave",()=>{
+    tt.style.left=Math.min(window.innerWidth-tw-12, clientX+16)+"px";
+    tt.style.top=Math.min(window.innerHeight-th-12, Math.max(8,clientY-th/2))+"px";
+  }
+  function hideTooltip(){
     tt.style.display="none"; cross.setAttribute("opacity",0);
     dots.setAttribute("opacity",0);
+  }
+
+  hit.addEventListener("pointermove",ev=>{
+    const r=svg.getBoundingClientRect();
+    const py=(ev.clientY-r.top)/r.height*H;
+    const i=indexAt(ev);
+    const line=nearestLineAt(i,py);
+    if(line) showTooltip(i,[line],ev.clientX,ev.clientY);
+    else if(pinned!=null) showTooltip(pinned,cols,ev.clientX,ev.clientY);
+    else hideTooltip();
+  });
+  hit.addEventListener("click",ev=>{
+    const r=svg.getBoundingClientRect();
+    const py=(ev.clientY-r.top)/r.height*H;
+    const i=indexAt(ev);
+    if(nearestLineAt(i,py)) return; // clicking on a line: hover already shows it
+    if(pinned===i){ pinned=null; hideTooltip(); }
+    else{ pinned=i; showTooltip(i,cols,ev.clientX,ev.clientY); }
+  });
+  hit.addEventListener("pointerleave",()=>{
+    pinned=null; hideTooltip();
   });
 
   card.appendChild(svg);
