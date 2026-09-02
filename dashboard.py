@@ -610,6 +610,13 @@ const state = {
   metrics: {plants:new Set(["plant_capacity_mw","plant_verif","plant_gas_m3"]), reservoirs:new Set(["res_volutil_pct"])},
   ents:    {plants:[], reservoirs:[]},      // selected entity names
   filter:  {plants:{region:"", group:"", q:""}, reservoirs:{region:"", group:"", q:""}},
+  // Off by default: hide a combined-cycle plant's individual dispatch-phase
+  // rows (e.g. "Santa Cruz Nova C26"/"UTE Santa Cruz") from the Thermal
+  // Plants entity list, showing only the combined physical-plant row (e.g.
+  // "SANTA CRUZ") -- see the `rolled_up` filter in entityRows() below, fed
+  // by attach_capacity() in ons_pipeline.py, which is what actually flags a
+  // phase entity this way. Toggled via the "Show sub-units" button.
+  showSubunits: false,
   // Excel-style per-column quick filters on the entity-picker tables, keyed by
   // metric id: {mode:"nonzero"|"zero"|"range", min, max}. Combines (AND) with
   // the region/fuel/search filters above -- see passesColFilters().
@@ -1046,6 +1053,14 @@ function entityRows(){
     // see attach_capacity in ons_pipeline.py) still stays visible.
     .filter(e=> kind!=="plant" || numOrNull(e.capacity_mw)!=null ||
       lastNonNull(fullSeries(skey("plant_verif", e.subsystem, e.entity)))!=null)
+    // Hide a multi-phase combined-cycle plant's individual dispatch-phase
+    // rows by default -- they're the same physical generation already
+    // counted (and shown with real capacity/utilization) on the combined
+    // entity attach_capacity() synthesizes for that CEG, so listing both
+    // reads as duplicated/inconsistent data rather than two real sources.
+    // The "Show sub-units" button (see buildEntityPicker) lets a visitor
+    // bring the phase-level rows back for CEGs that need that granularity.
+    .filter(e=> kind!=="plant" || state.showSubunits || !e.rolled_up)
     .filter(e=>!f.region || e.subsystem===f.region)
     .filter(e=>!f.group || e.group===f.group)
     .filter(e=>!f.q || e.entity.toLowerCase().includes(f.q.toLowerCase()))
@@ -1117,7 +1132,19 @@ function buildEntityPicker(card){
   allBtn.onclick=()=>{ setFilteredSelection(true); };
   const noneBtn=el("button",null,"Deselect all"+(filtered?" (filtered)":""));
   noneBtn.onclick=()=>{ setFilteredSelection(false); };
-  selRow.append(allBtn,noneBtn); card.appendChild(selRow);
+  selRow.append(allBtn,noneBtn);
+  if(kind==="plant"){
+    const subBtn=el("button",null, state.showSubunits?"Hide sub-units":"Show sub-units");
+    subBtn.setAttribute("aria-pressed", String(state.showSubunits));
+    subBtn.title="A combined-cycle plant can dispatch as several named "+
+      "phases sharing one physical plant (e.g. \"Santa Cruz Nova C26\" and "+
+      "\"UTE Santa Cruz\" are both part of \"SANTA CRUZ\"). By default only "+
+      "the combined plant is listed; turn this on to also list each phase "+
+      "row individually.";
+    subBtn.onclick=()=>{ state.showSubunits=!state.showSubunits; buildPickCard(); render(); };
+    selRow.appendChild(subBtn);
+  }
+  card.appendChild(selRow);
 
   const list=el("div","entlist"); list.id="entlist"; card.appendChild(list);
   renderEntityList();
