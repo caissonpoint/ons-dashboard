@@ -10,6 +10,7 @@ __pycache__/
 *.pyc
 node_modules/
 *.png
+!favicon.png
 
 # Personal-machine trigger scripts -- these embed a GitHub PAT, never commit them.
 run_refresh.local.bat
