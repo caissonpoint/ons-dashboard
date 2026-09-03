@@ -1989,10 +1989,10 @@ function renderKpis(){
   else if(minSub!=null){ flowLabel="Largest net importer"; flowSub=minSub; flowVal=-minVal; }
 
   host.appendChild(kpiTile("Latest available data", asOfDate, "", null, null,
-    "From ONS\u2019s grid balance bulletin (Balan\u00e7o de Energia nos Subsistemas). "+
-    "The national total only posts once every subsystem has reported for a day, so it can "+
-    "run behind the Thermal Plants tab, which is fed by a separate, more frequently updated "+
-    "per-plant dispatch bulletin."));
+    "From ONS\u2019s grid balance bulletin (Balan\u00e7o de Energia nos Subsistemas), which "+
+    "ONS posts once per day, usually in the evening (UTC). This site\u2019s automated build "+
+    "runs earlier in the day and can miss that update, so this tab can trail a day behind "+
+    "Thermal Plants, which draws on a bulletin ONS updates throughout the day."));
 
   host.appendChild(kpiTile("SIN load", fmtNum(loadV,0), "MWmed",
     "national balance · "+asOfDate));
@@ -2317,9 +2317,9 @@ function renderPlantsKpis(host){
 
   host.appendChild(kpiTile("Latest available data", asOfDate, "", null, null,
     "From ONS\u2019s per-plant dispatch bulletin (Gera\u00e7\u00e3o T\u00e9rmica por Despacho), "+
-    "which ONS updates more frequently than the subsystem balance bulletin the Subsystems tab "+
-    "uses \u2014 the two are independent ONS publications and don\u2019t always finish "+
-    "publishing for a given day at the same time."));
+    "which ONS updates throughout the day \u2014 unlike the subsystem balance bulletin the "+
+    "Subsystems tab uses, which ONS posts once per day, usually in the evening (UTC), after "+
+    "this site\u2019s own automated build has typically already run."));
 
   if(!gasPlants.length){
     host.appendChild(kpiTile("Gas-fired plants", "0", "",
