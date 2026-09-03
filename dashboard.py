@@ -1911,13 +1911,14 @@ function fuelMix(sub){
   }
   return {sub, date:DATA.dates[i], prod, parts:parts.filter(p=>p[1]!=null && p[1]>0)};
 }
-function kpiTile(label,big,unit,meta,color){
+function kpiTile(label,big,unit,meta,color,tooltip){
   const t=el("div","tile");
   t.innerHTML='<div class="nm">'+(color?'<span class="sw" style="background:'+
       color+';border-color:'+color+'"></span>':'')+label+'</div>'+
     '<div class="big">'+big+(unit?' <span style="font-size:12px;'+
       'color:var(--text-2);font-weight:400">'+unit+'</span>':'')+'</div>'+
     (meta?'<div class="meta">'+meta+'</div>':'');
+  if(tooltip) t.title=tooltip;
   return t;
 }
 const seriesArr=(m,s="SIN")=>DATA.series[skey(m,s)]||[];
@@ -1987,7 +1988,11 @@ function renderKpis(){
   if(maxSub!=null && maxVal>0){ flowLabel="Largest net exporter"; flowSub=maxSub; flowVal=maxVal; }
   else if(minSub!=null){ flowLabel="Largest net importer"; flowSub=minSub; flowVal=-minVal; }
 
-  host.appendChild(kpiTile("Latest available data", asOfDate, ""));
+  host.appendChild(kpiTile("Latest available data", asOfDate, "", null, null,
+    "From ONS\u2019s grid balance bulletin (Balan\u00e7o de Energia nos Subsistemas). "+
+    "The national total only posts once every subsystem has reported for a day, so it can "+
+    "run behind the Thermal Plants tab, which is fed by a separate, more frequently updated "+
+    "per-plant dispatch bulletin."));
 
   host.appendChild(kpiTile("SIN load", fmtNum(loadV,0), "MWmed",
     "national balance · "+asOfDate));
@@ -2085,7 +2090,10 @@ function renderReservoirKpis(host, extra){
   const asOf=lastIdx(seriesArr("ear_pct","SIN"));
   if(asOf>=0){
     const lagDays=DATA.dates.length-1-asOf;
-    host.appendChild(kpiTile("Latest available data", DATA.dates[asOf], ""));
+    host.appendChild(kpiTile("Latest available data", DATA.dates[asOf], "", null, null,
+      "From ONS\u2019s EAR Di\u00e1rio bulletin (reservoir storage) \u2014 a separate ONS "+
+      "publication from the grid balance and thermal dispatch bulletins, so its latest date "+
+      "can differ from the other tabs."));
   }
   const sin=earRow("SIN");
   if(sin && sin.pct!=null){
@@ -2307,7 +2315,11 @@ function renderPlantsKpis(host){
   const asOfDate=DATA.dates[asOf];
   const lagDays=DATA.dates.length-1-asOf;
 
-  host.appendChild(kpiTile("Latest available data", asOfDate, ""));
+  host.appendChild(kpiTile("Latest available data", asOfDate, "", null, null,
+    "From ONS\u2019s per-plant dispatch bulletin (Gera\u00e7\u00e3o T\u00e9rmica por Despacho), "+
+    "which ONS updates more frequently than the subsystem balance bulletin the Subsystems tab "+
+    "uses \u2014 the two are independent ONS publications and don\u2019t always finish "+
+    "publishing for a given day at the same time."));
 
   if(!gasPlants.length){
     host.appendChild(kpiTile("Gas-fired plants", "0", "",
