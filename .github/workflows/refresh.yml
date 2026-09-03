@@ -1,10 +1,19 @@
 name: Refresh ONS dashboard
 
-# ONS publishes twice on weekdays (12:00 and 19:00 UTC). This runs after the
-# second pass, so each build sees the day's consolidated figures.
+# The per-plant thermal dispatch and CMO bulletins update through the day, but
+# the subsystem grid-balance bulletin (Balanco de Energia nos Subsistemas) -- the
+# Subsystems tab's main source -- appears to post its finalized figures for the
+# prior day only once daily, in the evening UTC (observed landing on ONS's S3
+# bucket around 22:00 UTC on 2026-09-03). The original single run here, at 20:40
+# UTC, was timed for an earlier assumption about ONS's publish schedule and was
+# consistently running before that update landed, leaving the Subsystems tab a
+# full day behind Thermal Plants. Two runs a day -- one earlier for the
+# frequently-updated sources, one later to catch the balance bulletin's evening
+# post -- narrows that gap without permanently pinning to one guessed minute.
 on:
   schedule:
     - cron: "40 20 * * *"
+    - cron: "30 23 * * *"
   workflow_dispatch:          # "Run workflow" button, for an on-demand rebuild
   push:
     branches: [main]
