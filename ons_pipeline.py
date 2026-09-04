@@ -14,6 +14,10 @@ Datasets pulled (all from https://dados.ons.org.br, CC-BY):
             MWmes and %, one row per Reservatorio Equivalente -- a finer
             granularity than subsystem, coarser than an individual reservoir)
   cmo       CMO Semi-Horario                    (30-min -> daily mean, R$/MWh)
+  cvu       CVU das Usinas Termicas             (weekly per plant -> daily
+            R$/MWh variable dispatch cost, held flat across each PMO operative
+            week; joined to `termica` by cod_usinaplanejamento and rolled up
+            to per-subsystem gas-fleet CVU statistics -- see agg_cvu())
   termica   Geracao Termica por Motivo de Despacho (hourly per plant -> daily
             programmed/verified MWmed; bulletin sheet 09, and the source of the
             thermal-by-fuel splits)
@@ -187,6 +191,20 @@ SOURCES: dict[str, Source] = {
         s3_dir="cmo_tm",
         stem=lambda y, m: f"CMO_SEMIHORARIO_{y}",
         first_year=2020,
+    ),
+    # CVU das Usinas Termicas: the variable unit cost (R$/MWh) ONS's planning
+    # models assume per thermal plant per PMO operative week. Weekly, not
+    # daily, and keyed by cod_usinaplanejamento rather than a plant name --
+    # see the agg_cvu section below for both. Parquet is published for every
+    # year back to 2005 (checked 2005/2012/2016/2019/2021/2022 directly on
+    # 2026-09-03), so parquet_from matches first_year.
+    "cvu": Source(
+        key="cvu",
+        label="CVU das Usinas Termicas",
+        s3_dir="cvu_usitermica_se",
+        stem=lambda y, m: f"CVU_USINA_TERMICA_{y}",
+        parquet_from=2005,
+        first_year=2005,
     ),
     # Bulletin sheet 09 "Producao Termica" - programmed vs verified, per plant.
     "termica": Source(
@@ -682,7 +700,12 @@ TERMICA_REQUIRED = ["din_instante", "id_subsistema", "nom_usina",
 # optional for the same reason nom_combustivel is: present in current files,
 # absent from some older ones. It's the join key to the capacidade dataset
 # -- see attach_capacity().
-TERMICA_OPTIONAL = ["nom_combustivel", "ceg"]
+# `cod_usinaplanejamento` (the planning-model plant code) is optional on the
+# same terms. It is the join key to the `cvu` dataset -- see agg_cvu() -- for
+# the same reason `ceg` is the join key to `capacidade`: CVU publishes
+# planning-model short names ("MARANHAO3", "N.VENECIA2") that do not match
+# `termica`'s dispatch names.
+TERMICA_OPTIONAL = ["nom_combustivel", "ceg", "cod_usinaplanejamento"]
 
 TERMICA_METRICS = {"val_proggeracao": "plant_prog",
                    "val_verifgeracao": "plant_verif"}
@@ -761,10 +784,16 @@ def agg_termica_file(path: Path) -> pd.DataFrame:
         if chunk.empty:
             continue
         chunk["nom_usina"] = chunk["nom_usina"].astype(str).str.strip()
-        if "nom_combustivel" in chunk.columns:
-            attr_cols = ["nom_usina", "id_subsistema", "nom_combustivel"]
-            if "ceg" in chunk.columns:
-                attr_cols.append("ceg")
+        # Capture the plant-attribute columns this file happens to carry.
+        # Previously this ran only when nom_combustivel was present, which
+        # meant a file carrying `ceg`/`cod_usinaplanejamento` but no fuel
+        # label (every termica file before ~2026-04) contributed no
+        # attributes at all. Each optional column now travels independently
+        # and is merged column-wise in agg_termica below, so a plant can take
+        # its fuel from one file and its planning code from another.
+        opt_present = [c for c in TERMICA_OPTIONAL if c in chunk.columns]
+        if opt_present:
+            attr_cols = ["nom_usina", "id_subsistema"] + opt_present
             fuels.append(chunk[attr_cols].drop_duplicates())
         # a plant appears once per hour, so the daily mean is a straight mean
         parts.append(
@@ -790,14 +819,16 @@ def agg_termica_file(path: Path) -> pd.DataFrame:
     # `ceg` rides along the same way when the file has it; concat fills NaN
     # for files/rows that don't, so a plant with any file carrying its ceg
     # gets one (see cached_agg/agg_termica's drop_duplicates keep="last").
-    fmap = pd.DataFrame(columns=["entity", "subsystem", "group", "ceg"])
+    fmap = pd.DataFrame(columns=["entity", "subsystem", "group", "ceg", "cod"])
     if fuels:
         fmap = pd.concat(fuels, ignore_index=True).drop_duplicates(
             subset=["id_subsistema", "nom_usina"])
         fmap = fmap.rename(columns={"nom_usina": "entity", "id_subsistema": "subsystem",
-                                    "nom_combustivel": "group"})
-        if "ceg" not in fmap.columns:
-            fmap["ceg"] = pd.NA
+                                    "nom_combustivel": "group",
+                                    "cod_usinaplanejamento": "cod"})
+        for col in ("group", "ceg", "cod"):
+            if col not in fmap.columns:
+                fmap[col] = pd.NA
     return out[COLS], fmap
 
 
@@ -819,8 +850,27 @@ def agg_termica(paths: Iterable[Path], cache: Path | None = None) -> pd.DataFram
     out = pd.concat(frames, ignore_index=True)[COLS]
     e = pd.DataFrame()
     if ents:
-        e = pd.concat(ents, ignore_index=True).drop_duplicates(
-            subset=["subsystem", "entity"], keep="last")
+        # Pin the column set and dtype before concatenating: different
+        # generations of ONS files carry different subsets of the optional
+        # attribute columns, so the per-file frames otherwise disagree on both
+        # which columns exist and what dtype an absent (all-NA) one has --
+        # exactly the ambiguity pandas raises a FutureWarning about. These are
+        # all identity/label columns, so object is the honest dtype; `cod` is
+        # converted to a number where it is actually joined on (agg_cvu).
+        attr_cols = ["subsystem", "entity", "group", "ceg", "cod"]
+        e = pd.concat([f.reindex(columns=attr_cols).astype(object)
+                       for f in ents if not f.empty], ignore_index=True)
+        # Merge per column, not per row. A plain drop_duplicates(keep="last")
+        # would let a later file that carries `cod` but no `nom_combustivel`
+        # blank out a fuel label an earlier file supplied -- the attribute
+        # columns are populated by different generations of ONS files, so the
+        # last NON-NULL value per column is what each attribute wants.
+        for col in ("group", "ceg", "cod"):
+            if col in e.columns:
+                e[col] = e[col].replace("", pd.NA)
+        attrs = [c for c in e.columns if c not in ("subsystem", "entity")]
+        e = (e.groupby(["subsystem", "entity"], as_index=False)[attrs]
+               .agg(lambda col: col.dropna().iloc[-1] if col.notna().any() else pd.NA))
         e["kind"] = "plant"
     return out, e
 
@@ -1084,13 +1134,16 @@ def cached_agg(path: Path, fn, cache: Path | None, has_side: bool = False):
     st = path.stat()
     # AGG_VERSION invalidates every cached result when the aggregation logic
     # changes, so a fix does not sit behind results produced by the old code.
-    # Bumped to v3 for the fix making nom_combustivel optional in
+    # Bumped to v4: agg_termica_file's side table now also carries
+    # `cod_usinaplanejamento`, the join key the `cvu` dataset needs, so every
+    # v3 side table on disk is missing a column and has to be rebuilt.
+    # Previously bumped to v3 for the fix making nom_combustivel optional in
     # agg_termica_file -- old cached termica results were built before that
     # file could even successfully aggregate (it raised and was skipped), so
     # this mainly forces every previously-skipped termica file to actually
     # run once under the new code, plus a one-time re-aggregate of anything
     # else that shares this cache helper.
-    tag = f"{path.stem}__v3_{st.st_size}_{int(st.st_mtime)}"
+    tag = f"{path.stem}__v4_{st.st_size}_{int(st.st_mtime)}"
     hit = (cache / f"{tag}.parquet") if cache else None
     side_path = (cache / f"{tag}.side.parquet") if cache else None
 
@@ -1199,6 +1252,189 @@ EAR_REE_METRICS = {
     "ear_verif_ree_percentual": "ear_ree_pct",
     "ear_max_ree": "ear_ree_max_mwmes",
 }
+
+
+
+# --------------------------------------------------------------------------
+# CVU das Usinas Termicas: variable unit cost of thermal dispatch
+#
+# One row per (PMO operative week, thermal plant): `val_cvu` in R$/MWh, the
+# variable cost ONS's planning models (NEWAVE / DECOMP / DESSEM) assume for
+# that plant that week. Schema confirmed against ONS's own data dictionary
+# (cvu_usitermica_se/DicionarioDados_CVU_UsinaTermica.json) and a live 2026
+# file on 2026-09-03.
+#
+# Two things make this source unlike every other one here:
+#
+#  1. It is WEEKLY. `dat_iniciosemana` .. `dat_fimsemana` bound one PMO
+#     operative week. Each row is expanded to one row per day across its own
+#     week so it lands in the same daily store as everything else. A CVU is a
+#     forward assumption held flat for the whole week, so repeating the value
+#     across the week's days is what the data actually says -- it is not an
+#     interpolation between two observations.
+#
+#  2. It is keyed by `cod_usinaplanejamento`, and its `nom_usina` is the
+#     planning-model short name ("MARANHAO3", "AUR.CHAVES", "N.VENECIA2"),
+#     which does not match `termica`'s dispatch names. Measured against real
+#     files on 2026-09-03: normalized name matching links 32 of 122 CVU
+#     plants, the planning code links 95 of 139 dispatch entities. So the
+#     code is the join key, exactly as `ceg` is the join key to `capacidade`.
+#     The dispatch entities left unmatched are almost entirely the P1/P2
+#     phases of combined-cycle blocks, whose P0 phase carries the CVU.
+#
+# ONS restates a week by publishing a higher `num_revisao`; the highest
+# revision for a given (week, subsystem, plant) wins.
+#
+# What reaches the store:
+#   * per-plant `cvu` rows, for plants whose planning code matched a `termica`
+#     dispatch entity (so the entity name is one the rest of the store already
+#     knows). Not currently surfaced as a dashboard metric -- adding a
+#     "cvu" entry with kind "plant" to SERIES_META in dashboard.py is all it
+#     would take -- but it is what the subsystem roll-ups below are computed
+#     from, and it is in daily.parquet/daily.csv for anything reading those.
+#   * per-subsystem gas-fleet statistics (CVU_ROLLUPS), the series the
+#     dashboard charts next to CMO.
+#
+# Zero-CVU plants are excluded from the roll-ups. A CVU of exactly 0 is an
+# inflexible/must-run unit carrying no variable cost in the model, not the
+# cheapest dispatchable megawatt on the system -- about 5% of gas-plant rows
+# in 2026. Including them would peg "cheapest gas plant" at 0 on most days and
+# say nothing about where gas actually sits in the merit order.
+# --------------------------------------------------------------------------
+
+CVU_REQUIRED = ["dat_iniciosemana", "dat_fimsemana", "id_subsistema",
+                "nom_usina", "cod_usinaplanejamento", "val_cvu"]
+CVU_OPTIONAL = ["num_revisao"]
+
+CVU_WEEKLY_COLS = ["week_start", "week_end", "subsystem", "cod", "cvu_name",
+                   "num_revisao", "val_cvu"]
+
+# Subsystem-level series derived from the per-plant CVUs of gas-fired plants.
+CVU_ROLLUPS = {
+    "cvu_gas_min": lambda g: g.min(),
+    "cvu_gas_med": lambda g: g.median(),
+    "cvu_gas_max": lambda g: g.max(),
+}
+
+# A PMO operative week is 7 days; anything outside this is a malformed row.
+CVU_MAX_WEEK_DAYS = 14
+
+
+def agg_cvu_file(path: Path) -> pd.DataFrame:
+    """One CVU file -> tidy weekly rows. No date expansion yet (see agg_cvu)."""
+    frames = []
+    for chunk in _chunks(path, CVU_REQUIRED, optional=CVU_OPTIONAL):
+        chunk = chunk.copy()
+        chunk = coerce_numeric(chunk, ["val_cvu", "cod_usinaplanejamento"],
+                               where=f"{path.name}: ")
+        if "num_revisao" in chunk.columns:
+            chunk = coerce_numeric(chunk, ["num_revisao"], where=f"{path.name}: ")
+            chunk["num_revisao"] = chunk["num_revisao"].fillna(0)
+        else:
+            chunk["num_revisao"] = 0
+        chunk["week_start"] = to_date(chunk["dat_iniciosemana"], where=f"{path.name}: ")
+        chunk["week_end"] = to_date(chunk["dat_fimsemana"], where=f"{path.name}: ")
+        chunk = chunk.dropna(subset=["week_start", "week_end", "val_cvu",
+                                     "cod_usinaplanejamento"])
+        if chunk.empty:
+            continue
+        chunk["subsystem"] = chunk["id_subsistema"].astype(str).str.strip().str.upper()
+        chunk["cod"] = chunk["cod_usinaplanejamento"].round().astype("Int64")
+        chunk["cvu_name"] = chunk["nom_usina"].astype(str).str.strip()
+        frames.append(chunk[CVU_WEEKLY_COLS])
+    if not frames:
+        return pd.DataFrame(columns=CVU_WEEKLY_COLS)
+    return pd.concat(frames, ignore_index=True)
+
+
+def agg_cvu(paths: Iterable[Path], plant_attrs: pd.DataFrame,
+            cache: Path | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Weekly per-plant CVU -> daily per-plant rows + daily subsystem roll-ups.
+
+    `plant_attrs` is the `termica` entity table (entity/subsystem/group/cod);
+    it supplies both the dispatch name a planning code belongs to and the fuel
+    label that decides which plants count toward the gas roll-ups. With no
+    `termica` in the run there is nothing to join to, so this yields nothing
+    rather than guessing -- the roll-ups are explicitly gas-fleet statistics,
+    and the fuel label is the only thing that says which plants those are.
+    """
+    frames = []
+    for p in paths:
+        try:
+            df = cached_agg(p, agg_cvu_file, cache)
+        except Exception as e:
+            print(f"  ! skipping {p.name}: {e}", file=sys.stderr)
+            continue
+        if not df.empty:
+            frames.append(df)
+    empty = pd.DataFrame(columns=COLS)
+    if not frames:
+        return empty, empty
+
+    w = pd.concat(frames, ignore_index=True)
+    before = len(w)
+    w = (w.sort_values(["week_start", "subsystem", "cod", "num_revisao"])
+           .drop_duplicates(["week_start", "subsystem", "cod"], keep="last")
+           .reset_index(drop=True))
+    if before != len(w):
+        print(f"  {before - len(w):,} superseded row(s) dropped "
+              f"(a later PMO revision restated the same plant-week)")
+
+    span = (w["week_end"] - w["week_start"]).dt.days + 1
+    bad = (span < 1) | (span > CVU_MAX_WEEK_DAYS)
+    if bad.any():
+        print(f"  ! {int(bad.sum()):,} CVU row(s) have an implausible operative "
+              f"week (outside 1..{CVU_MAX_WEEK_DAYS} days) -- clipped",
+              file=sys.stderr)
+    span = span.clip(lower=1, upper=CVU_MAX_WEEK_DAYS).astype(int)
+
+    daily = w.loc[w.index.repeat(span)].copy()
+    daily["date"] = daily["week_start"] + pd.to_timedelta(
+        daily.groupby(level=0).cumcount(), unit="D")
+    daily = daily.reset_index(drop=True)
+
+    attrs = plant_attrs if plant_attrs is not None else pd.DataFrame()
+    if attrs.empty or "cod" not in attrs.columns:
+        print("  ! no termica plant attributes available -- CVU needs them for "
+              "both the dispatch name and the fuel label, so no CVU series "
+              "were produced (run with `termica` in --datasets)", file=sys.stderr)
+        return empty, empty
+
+    a = attrs.copy()
+    a["cod"] = pd.to_numeric(a["cod"], errors="coerce").round().astype("Int64")
+    a = (a.dropna(subset=["cod"])
+          .drop_duplicates(subset=["cod"], keep="last")[["cod", "entity", "group"]])
+    daily = daily.merge(a, on="cod", how="left")
+
+    n_plants = daily["cod"].nunique()
+    n_matched = daily.loc[daily["entity"].notna(), "cod"].nunique()
+    print(f"  CVU covers {n_plants} planning-code plant(s); {n_matched} matched a "
+          f"termica dispatch entity by cod_usinaplanejamento "
+          f"({100 * n_matched / max(n_plants, 1):.0f}%)")
+
+    matched = daily[daily["entity"].notna()].copy()
+    plant = matched.rename(columns={"val_cvu": "value"})
+    plant["series"] = "cvu"
+    plant_rows = plant[COLS]
+
+    gas = matched[matched["group"].map(
+        lambda g: classify_fuel("termica", g) == "thermal_gas")]
+    gas = gas[gas["val_cvu"] > 0]
+    if gas.empty:
+        print("  ! no gas-fired plant matched a CVU -- subsystem roll-ups skipped",
+              file=sys.stderr)
+        return plant_rows, empty
+    print(f"  {gas['cod'].nunique()} gas-fired plant(s) feed the subsystem "
+          f"CVU roll-ups")
+
+    g = gas.groupby(["date", "subsystem"], observed=True)["val_cvu"]
+    roll = pd.concat(
+        [fn(g).rename(name) for name, fn in CVU_ROLLUPS.items()], axis=1
+    ).reset_index().melt(id_vars=["date", "subsystem"], var_name="series",
+                         value_name="value")
+    roll["entity"] = ""
+    roll = roll.dropna(subset=["value"])
+    return plant_rows, roll[COLS]
 
 
 def ree_subsystem_map(hidro_dir: Path) -> dict[str, str]:
@@ -1394,6 +1630,7 @@ def build_store(raw: Path, out: Path, keys: list[str]) -> pd.DataFrame:
     parts: list[pd.DataFrame] = []
     entities: list[pd.DataFrame] = []
     cap_lookup = pd.DataFrame()
+    cvu_files: list[Path] = []
     cache = out / "_cache"
     for key in keys:
         d = raw / key
@@ -1417,6 +1654,12 @@ def build_store(raw: Path, out: Path, keys: list[str]) -> pd.DataFrame:
                 entities.append(ent)
         elif key == "cmo":
             part = agg_cmo(files)
+        elif key == "cvu":
+            # Deferred: agg_cvu joins on the `termica` entity table, which
+            # does not exist yet inside this loop (and `keys` is user-ordered,
+            # so there is no ordering to rely on). Handled after the loop.
+            cvu_files = files
+            continue
         elif key == "termica":
             part, ent = agg_termica(files, cache / "termica")
             if not ent.empty:
@@ -1453,9 +1696,21 @@ def build_store(raw: Path, out: Path, keys: list[str]) -> pd.DataFrame:
             subset=["kind", "subsystem", "entity"], keep="last")
         ent_df["subsystem"] = ent_df["subsystem"].astype(str).str.strip().str.upper()
         ent_df["group"] = ent_df["group"].fillna("").astype(str).str.strip()
-        keep_cols = ["kind", "entity", "subsystem", "group"] + (
-            ["ceg"] if "ceg" in ent_df.columns else [])
+        keep_cols = ["kind", "entity", "subsystem", "group"] + [
+            c for c in ("ceg", "cod") if c in ent_df.columns]
         ent_df = ent_df[keep_cols]
+
+    # CVU, now that the termica entity table (dispatch name + fuel label per
+    # planning code) exists. Both the per-plant rows and the subsystem gas
+    # roll-ups come out of one pass -- see agg_cvu.
+    if cvu_files:
+        cvu_plant, cvu_roll = agg_cvu(cvu_files, ent_df, cache / "cvu")
+        for part in (cvu_plant, cvu_roll):
+            if not part.empty:
+                df = pd.concat([df, part], ignore_index=True)
+        if not cvu_roll.empty:
+            print(f"  {len(cvu_roll):,} daily subsystem CVU rows "
+                  f"({', '.join(sorted(cvu_roll['series'].unique()))})")
 
     # Prefer the bulletin's own thermal source for the fuel splits. Geracao por
     # Usina still works when `termica` is not in the run, but it is a much larger
@@ -1484,6 +1739,8 @@ def build_store(raw: Path, out: Path, keys: list[str]) -> pd.DataFrame:
     # added beyond these six (it already dropped `ceg` even before `rolled_up`
     # existed) -- `rolled_up` has to be listed here explicitly or the dashboard
     # payload never sees it, regardless of what attach_capacity computed.
+    # `ceg` and `cod` are join keys (to capacidade and cvu respectively), both
+    # already consumed above, so neither survives into the dashboard payload.
     ent_df = ent_df[["kind", "entity", "subsystem", "group",
                      "capacity_mw", "heat_rate_kcal_per_kwh", "rolled_up"]]
 

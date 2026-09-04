@@ -56,6 +56,13 @@ SERIES_META: dict[str, tuple[str, str, str, bool, str]] = {
     "ena_storable_pct_mlt": ("ENA storable, % MLT",  "%", "Hydrology", False, ""),
     "ear_pct":              ("EAR, % of capacity",   "%", "Hydrology", False, ""),
     "cmo":                  ("CMO",                  "R$/MWh", "Prices", False, ""),
+    # CVU das Usinas Termicas, rolled up per subsystem across gas-fired plants
+    # with a non-zero CVU (a CVU of exactly 0 is an inflexible/must-run unit,
+    # not the cheapest dispatchable megawatt -- see agg_cvu in ons_pipeline.py).
+    # Read against CMO: gas plants whose CVU sits below CMO are in the money.
+    "cvu_gas_min":          ("CVU \u2014 cheapest gas plant", "R$/MWh", "Prices", False, ""),
+    "cvu_gas_med":          ("CVU \u2014 median gas plant",   "R$/MWh", "Prices", False, ""),
+    "cvu_gas_max":          ("CVU \u2014 priciest gas plant", "R$/MWh", "Prices", False, ""),
     # per-plant (bulletin sheet 09)
     "plant_verif":          ("Verified",             "MWmed", "Thermal plant", False, "plant"),
     "plant_prog":           ("Programmed",           "MWmed", "Thermal plant", False, "plant"),
@@ -145,6 +152,16 @@ def add_sin(df: pd.DataFrame) -> pd.DataFrame:
 
     if "cmo" in wide.columns:
         sin["cmo"] = wide["cmo"].groupby(level="date").mean()
+
+    # CVU roll-ups. The national cheapest/priciest gas plant is exactly the
+    # min/max of the four subsystem figures, so those two are computed
+    # exactly. A national *median* is not recoverable from four subsystem
+    # medians, so it falls back to their mean -- the same approximation `cmo`
+    # above already makes for SIN, and called out in the dashboard footer.
+    for series, how in (("cvu_gas_min", "min"), ("cvu_gas_max", "max"),
+                        ("cvu_gas_med", "mean")):
+        if series in wide.columns:
+            sin[series] = getattr(wide[series].groupby(level="date"), how)()
 
     sin = sin.reset_index().melt(id_vars="date", var_name="series", value_name="value")
     sin["subsystem"], sin["entity"] = "SIN", ""
@@ -500,6 +517,12 @@ table.data thead th.sortable:hover{background:var(--wash)}
 .foot{color:var(--muted);font-size:11.5px;margin-top:22px;line-height:1.7}
 .foot a{color:var(--accent)}
 #boot{padding:60px 0;text-align:center;color:var(--muted)}
+/* The `hidden` attribute is how every view toggle here shows and hides its
+   containers, but the UA's [hidden]{display:none} rule loses to any class
+   that sets display -- .tiles{display:grid} in particular, which is why the
+   KPI strip stayed on screen in the Data Tables view. Make the attribute
+   authoritative so `el.hidden = true` means hidden everywhere. */
+[hidden]{display:none!important}
 </style>
 </head>
 <body>
@@ -527,6 +550,7 @@ table.data thead th.sortable:hover{background:var(--wash)}
   <a href="https://dados.ons.org.br/dataset/ear-diario-por-subsistema" target="_blank" rel="noopener">Reservoir storage (EAR)<svg class="ext-icon" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>
   <a href="https://dados.ons.org.br/dataset/ena-diario-por-subsistema" target="_blank" rel="noopener">Inflow energy (ENA)<svg class="ext-icon" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>
   <a href="https://dados.ons.org.br/dataset/cmo-semi-horario" target="_blank" rel="noopener">Marginal cost (CMO)<svg class="ext-icon" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>
+  <a href="https://dados.ons.org.br/dataset/cvu-usitermica" target="_blank" rel="noopener">Thermal dispatch cost (CVU)<svg class="ext-icon" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>
 </div>
 
 <div id="boot">Unpacking data&hellip;</div>
@@ -543,7 +567,7 @@ table.data thead th.sortable:hover{background:var(--wash)}
 <div class="tiles" id="kpiTiles" style="margin-bottom:14px"></div>
 <div id="resSummary"></div>
 
-<div class="card">
+<div class="card" id="controlsCard">
   <div class="controls">
     <div class="ctl"><label>Date range</label><div class="row" id="presets"></div></div>
     <div class="ctl"><label>From</label><input type="date" id="from"></div>
@@ -557,6 +581,8 @@ table.data thead th.sortable:hover{background:var(--wash)}
 </div>
 
 <div class="card" id="pickCard"></div>
+<div class="card" id="tablesCard" hidden></div>
+<div class="card" id="tablesTableCard" hidden></div>
 
 <div id="charts"></div>
 <div class="card" id="tableCard" hidden>
@@ -598,6 +624,10 @@ const VIEWS = [
   {id:"subsystems", label:"Subsystems", kind:""},
   {id:"plants",     label:"Thermal plants", kind:"plant"},
   {id:"reservoirs", label:"Reservoirs", kind:"reservoir"},
+  // kind:null marks a view with no entity picker, no chart panels and no
+  // series selection of its own -- render() branches on it entirely. See the
+  // Data Tables block further down.
+  {id:"tables",     label:"Data Tables", kind:null},
 ];
 
 const state = {
@@ -605,11 +635,15 @@ const state = {
   from: null, to: null, smooth: 1,
   subs: new Set(["SIN"]),
   table: false,
-  slots: {subsystems:new Map(), plants:new Map(), reservoirs:new Map()},
-  picked: {subsystems:[], plants:[], reservoirs:[]},
-  metrics: {plants:new Set(["plant_capacity_mw","plant_verif","plant_gas_m3"]), reservoirs:new Set(["res_volutil_pct"])},
-  ents:    {plants:[], reservoirs:[]},      // selected entity names
-  filter:  {plants:{region:"", group:"", q:""}, reservoirs:{region:"", group:"", q:""}},
+  // Every per-view map below carries a `tables` entry too. render() short-
+  // circuits before any of them is used in that view, but buildTabs' click
+  // handler still calls buildSubs/buildPickCard on the way in, and a missing
+  // key there is an undefined dereference rather than an empty selection.
+  slots: {subsystems:new Map(), plants:new Map(), reservoirs:new Map(), tables:new Map()},
+  picked: {subsystems:[], plants:[], reservoirs:[], tables:[]},
+  metrics: {plants:new Set(["plant_capacity_mw","plant_verif","plant_gas_m3"]), reservoirs:new Set(["res_volutil_pct"]), tables:new Set()},
+  ents:    {plants:[], reservoirs:[], tables:[]},   // selected entity names
+  filter:  {plants:{region:"", group:"", q:""}, reservoirs:{region:"", group:"", q:""}, tables:{region:"", group:"", q:""}},
   // Off by default: hide a combined-cycle plant's individual dispatch-phase
   // rows (e.g. "Santa Cruz Nova C26"/"UTE Santa Cruz") from the Thermal
   // Plants entity list, showing only the combined physical-plant row (e.g.
@@ -620,7 +654,13 @@ const state = {
   // Excel-style per-column quick filters on the entity-picker tables, keyed by
   // metric id: {mode:"nonzero"|"zero"|"range", min, max}. Combines (AND) with
   // the region/fuel/search filters above -- see passesColFilters().
-  colFilter: {plants:new Map(), reservoirs:new Map()},
+  colFilter: {plants:new Map(), reservoirs:new Map(), tables:new Map()},
+  // Data Tables view. Its own date window, deliberately separate from the
+  // chart tabs' range: the useful default here is "the last few weeks of raw
+  // rows", not whatever multi-year span the charts are showing. from/to are
+  // filled in at boot (see initTables).
+  tbl: {src:"balanco", from:null, to:null, q:"", page:0, sort:null,
+        subs:new Set(["SIN","SE","S","NE","N"])},
 };
 const view = () => VIEWS.find(v=>v.id===state.view);
 const picked = () => state.picked[state.view];
@@ -1989,10 +2029,10 @@ function renderKpis(){
   else if(minSub!=null){ flowLabel="Largest net importer"; flowSub=minSub; flowVal=-minVal; }
 
   host.appendChild(kpiTile("Latest available data", asOfDate, "", null, null,
-    "From ONS\u2019s grid balance bulletin (Balan\u00e7o de Energia nos Subsistemas). "+
-    "The national total only posts once every subsystem has reported for a day, so it can "+
-    "run behind the Thermal Plants tab, which is fed by a separate, more frequently updated "+
-    "per-plant dispatch bulletin."));
+    "From ONS\u2019s grid balance bulletin (Balan\u00e7o de Energia nos Subsistemas), which "+
+    "ONS posts once per day, usually in the evening (UTC). This site\u2019s automated build "+
+    "runs earlier in the day and can miss that update, so this tab can trail a day behind "+
+    "Thermal Plants, which draws on a bulletin ONS updates throughout the day."));
 
   host.appendChild(kpiTile("SIN load", fmtNum(loadV,0), "MWmed",
     "national balance · "+asOfDate));
@@ -2317,9 +2357,9 @@ function renderPlantsKpis(host){
 
   host.appendChild(kpiTile("Latest available data", asOfDate, "", null, null,
     "From ONS\u2019s per-plant dispatch bulletin (Gera\u00e7\u00e3o T\u00e9rmica por Despacho), "+
-    "which ONS updates more frequently than the subsystem balance bulletin the Subsystems tab "+
-    "uses \u2014 the two are independent ONS publications and don\u2019t always finish "+
-    "publishing for a given day at the same time."));
+    "which ONS updates throughout the day \u2014 unlike the subsystem balance bulletin the "+
+    "Subsystems tab uses, which ONS posts once per day, usually in the evening (UTC), after "+
+    "this site\u2019s own automated build has typically already run."));
 
   if(!gasPlants.length){
     host.appendChild(kpiTile("Gas-fired plants", "0", "",
@@ -2389,7 +2429,396 @@ function renderPlantsKpis(host){
   }
 }
 
-function render(){ renderKpis(); renderCharts(); renderTable(); }
+/* ---------- Data Tables view -----------------------------------------------
+   Every ONS dataset this pipeline consumes, as a plain table: pick a source,
+   filter it, sort any column, page through it, export what you filtered.
+
+   What these tables show is the *aggregated daily store* -- one row per
+   date/subsystem (and per plant, reservoir or REE where the source has that
+   granularity), which is the same data the charts on the other tabs are drawn
+   from. It is not ONS's raw hourly/semi-hourly publication: those are averaged
+   to daily means upstream (see the footer). Each source header links to the
+   original dataset on dados.ons.org.br if the raw files are what you need.
+----------------------------------------------------------------------------*/
+const ONS_DS = "https://dados.ons.org.br/dataset/";
+const TBL_PAGE = 300;
+
+// `metrics` are SERIES_META ids; `kind` is the entity granularity ("" =
+// subsystem-level, else "plant"/"reservoir"/"ree"). `static:true` marks the
+// one source that is not a time series at all -- Capacidade Instalada is a
+// live snapshot of per-plant nameplate MW, so it rides in the payload as
+// entity attributes rather than dated rows.
+const TABLE_SOURCES = [
+  {id:"balanco", label:"Grid balances", slug:"balanco-energia-subsistema", kind:"",
+   metrics:["load","production_total","gen_hydro","gen_thermal","gen_gas",
+            "thermal_nongas","gen_wind","gen_solar","net_interchange"],
+   note:"Balanço de Energia nos Subsistemas. Hourly, averaged to daily means. "+
+        "Net interchange is positive when the subsystem is a net exporter."},
+  {id:"termica", label:"Thermal dispatch by plant", slug:"geracao-termica-despacho-2",
+   kind:"plant",
+   metrics:["plant_prog","plant_verif","plant_desvio_pct","plant_capacity_mw",
+            "plant_utilization_pct","plant_gas_m3"],
+   note:"Geração Térmica por Motivo de Despacho (bulletin sheet 09), hourly per "+
+        "plant, averaged to daily. Capacity, utilization and estimated gas "+
+        "consumption are derived — see the footer for the heat-rate assumption. "+
+        "A combined-cycle block appears both as its individual dispatch phases "+
+        "and as one combined plant row; don't sum the two together."},
+  {id:"fuel", label:"Thermal generation by fuel", slug:"geracao-termica-despacho-2",
+   kind:"",
+   metrics:["thermal_gas","thermal_coal","thermal_oil","thermal_nuclear",
+            "thermal_biomass","thermal_other","thermal_utilization_pct",
+            "gas_consumption_m3"],
+   note:"Per-fuel splits summed from the same per-plant dispatch data, plus the "+
+        "fleet-level utilization and estimated gas consumption rollups."},
+  {id:"hidraulico", label:"Hydro reservoirs", slug:"dados-hidrologicos-res",
+   kind:"reservoir", metrics:["res_volutil_pct","res_level_m"],
+   note:"Dados Hidráulicos por Reservatório (bulletin sheets 23–26). Already daily."},
+  {id:"ear", label:"Reservoir storage (EAR)", slug:"ear-diario-por-subsistema",
+   kind:"", metrics:["ear_mwmes","ear_max_mwmes","ear_pct"],
+   note:"EAR Diário por Subsistema. Already daily."},
+  {id:"ear_ree", label:"Reservoir storage by REE", slug:"ear-diario-por-ree",
+   kind:"ree", metrics:["ear_ree_mwmes","ear_ree_max_mwmes","ear_ree_pct"],
+   note:"EAR Diário por REE — reservoir-equivalent cascades, finer than the "+
+        "subsystem totals above, which are just these summed up."},
+  {id:"ena", label:"Inflow energy (ENA)", slug:"ena-diario-por-subsistema", kind:"",
+   metrics:["ena_gross_mwmes","ena_storable_mwmes","ena_pct_mlt","ena_storable_pct_mlt"],
+   note:"ENA Diário por Subsistema. Already daily. %MLT is against the long-term mean."},
+  {id:"cmo", label:"Marginal cost (CMO)", slug:"cmo-semi-horario", kind:"",
+   metrics:["cmo"],
+   note:"CMO Semi-Horário, 30-minute settlement prices averaged to a daily mean."},
+  {id:"cvu", label:"Thermal dispatch cost (CVU)", slug:"cvu-usitermica", kind:"",
+   metrics:["cvu_gas_min","cvu_gas_med","cvu_gas_max"],
+   note:"CVU das Usinas Térmicas. Published weekly per plant and held flat across "+
+        "each PMO operative week. These are the cheapest, median and priciest CVU "+
+        "among gas-fired plants with a CVU above zero — a CVU of exactly zero is "+
+        "an inflexible/must-run unit, not a cheap dispatchable megawatt."},
+  {id:"capacidade", label:"Installed capacity", slug:"capacidade-geracao",
+   kind:"plant", static:true,
+   note:"Capacidade Instalada de Geração — a live snapshot with no history, joined "+
+        "to the dispatch data by ANEEL venture ID (CEG). One row per plant entity."},
+];
+const tblSource = () => TABLE_SOURCES.find(s=>s.id===state.tbl.src) || TABLE_SOURCES[0];
+
+/* -- row construction ------------------------------------------------------ */
+function tblEntities(kind){
+  return (DATA.entities||[]).filter(e=>e.kind===kind);
+}
+function tblColumns(src){
+  if(src.static){
+    return [{key:"entity", label:"Plant", num:false},
+            {key:"subsystem", label:"Subsystem", num:false},
+            {key:"group", label:"Fuel", num:false},
+            {key:"capacity_mw", label:"Installed capacity (MW)", num:true, dec:1},
+            {key:"heat_rate_kcal_per_kwh", label:"Heat rate (kcal/kWh)", num:true, dec:0},
+            {key:"rolled_up", label:"Dispatch phase of a combined plant", num:false}];
+  }
+  const cols=[{key:"date", label:"Date", num:false},
+              {key:"subsystem", label:"Subsystem", num:false}];
+  if(src.kind) cols.push({key:"entity", label:tblEntityLabel(src.kind), num:false});
+  src.metrics.forEach(m=>{
+    const meta=DATA.seriesMeta[m];
+    if(!meta) return;                       // series absent from this build
+    cols.push({key:m, label:meta.label+" ("+meta.unit+")", num:true,
+               dec:(meta.unit==="%"||meta.unit==="R$/MWh"||meta.unit==="m")?2:1});
+  });
+  return cols;
+}
+function tblEntityLabel(kind){
+  return kind==="plant" ? "Plant" : kind==="reservoir" ? "Reservoir"
+       : kind==="ree" ? "REE" : "Entity";
+}
+// Index bounds of the tables view's own date window (independent of the chart
+// tabs' range, which is hidden while this view is up).
+function tblBounds(){
+  const d=DATA.dates;
+  let i0=d.indexOf(state.tbl.from), i1=d.indexOf(state.tbl.to);
+  if(i0<0) i0=0;
+  if(i1<0) i1=d.length-1;
+  if(i1<i0){ const t=i0; i0=i1; i1=t; }
+  return [i0,i1];
+}
+function tblRows(src){
+  const cols=tblColumns(src);
+  const q=(state.tbl.q||"").trim().toLowerCase();
+  const rows=[];
+  if(src.static){
+    tblEntities(src.kind).forEach(e=>{
+      if(q && !String(e.entity).toLowerCase().includes(q)) return;
+      if(!state.tbl.subs.has(e.subsystem)) return;
+      rows.push(cols.map(c=>{
+        if(c.key==="rolled_up") return e.rolled_up===true||e.rolled_up==="True" ? "yes" : "";
+        const v=e[c.key];
+        if(c.num) return (v===""||v==null) ? null : Number(v);
+        return v==null ? "" : String(v);
+      }));
+    });
+    return {cols, rows};
+  }
+  const [i0,i1]=tblBounds();
+  const metricCols=cols.filter(c=>c.key!=="date"&&c.key!=="subsystem"&&c.key!=="entity");
+  const targets=[];
+  if(src.kind){
+    tblEntities(src.kind).forEach(e=>{
+      if(!state.tbl.subs.has(e.subsystem)) return;
+      if(q && !String(e.entity).toLowerCase().includes(q)) return;
+      targets.push({sub:e.subsystem, ent:e.entity});
+    });
+  } else {
+    DATA.subsystems.forEach(sub=>{
+      if(!state.tbl.subs.has(sub)) return;
+      if(q && !sub.toLowerCase().includes(q)) return;
+      targets.push({sub, ent:""});
+    });
+  }
+  // Go through fullSeries(), not DATA.series directly: several thermal-plant
+  // columns (deviation, capacity, utilization, estimated gas) are derived
+  // client-side from plant_verif plus the entity's static attributes and have
+  // no entry in DATA.series at all -- reading the payload raw would show them
+  // as permanently empty. exists() is the matching "is this combination real"
+  // test fullSeries relies on.
+  //
+  // fullSeries also applies the chart tabs' smoothing window. These are data
+  // tables: they show what the store holds, so smoothing is pinned off for
+  // the duration of the build. The memo fullSeries keeps is keyed by window
+  // size, so this neither reads nor poisons the smoothed entries the charts
+  // are using.
+  const prevSmooth=state.smooth;
+  state.smooth=1;
+  try{
+    targets.forEach(t=>{
+      const vecs=metricCols.map(c=>{
+        const k=skey(c.key,t.sub,t.ent);
+        return exists(k) ? fullSeries(k) : null;
+      });
+      if(vecs.every(v=>v===null)) return;   // this entity has none of these series
+      for(let i=i0;i<=i1;i++){
+        const vals=vecs.map(v=>v?(v[i]==null?null:v[i]):null);
+        if(vals.every(v=>v==null)) continue;  // no data that day: skip the row
+        const row=[DATA.dates[i], t.sub];
+        if(src.kind) row.push(t.ent);
+        rows.push(row.concat(vals));
+      }
+    });
+  } finally { state.smooth=prevSmooth; }
+  return {cols, rows};
+}
+function tblSortRows(cols, rows){
+  const st=state.tbl.sort;
+  if(!st || st.col==null || st.col>=cols.length) return rows;
+  const num=cols[st.col].num, sign=st.dir==="asc"?1:-1;
+  return rows.slice().sort((a,b)=>{
+    const x=a[st.col], y=b[st.col];
+    // Nulls always sort last, whichever direction the column is going -- an
+    // empty cell is missing data, not a very small (or very large) value.
+    if(x==null&&y==null) return 0;
+    if(x==null) return 1;
+    if(y==null) return -1;
+    if(num) return sign*(x-y);
+    return sign*String(x).localeCompare(String(y));
+  });
+}
+
+/* -- rendering ------------------------------------------------------------- */
+function renderTables(){
+  const src=tblSource();
+  renderTablesControls(src);
+  const {cols,rows}=tblRows(src);
+  const sorted=tblSortRows(cols,rows);
+  const pages=Math.max(1, Math.ceil(sorted.length/TBL_PAGE));
+  if(state.tbl.page>=pages) state.tbl.page=pages-1;
+  if(state.tbl.page<0) state.tbl.page=0;
+  const start=state.tbl.page*TBL_PAGE;
+  const page=sorted.slice(start, start+TBL_PAGE);
+
+  const card=document.getElementById("tablesTableCard");
+  card.innerHTML="";
+
+  const head=el("div","row");
+  head.style.cssText="justify-content:space-between;align-items:baseline;margin-bottom:10px;flex-wrap:wrap;gap:8px";
+  const count=el("div","muted");
+  count.textContent = sorted.length.toLocaleString()+" row"+(sorted.length===1?"":"s")+
+    (sorted.length>TBL_PAGE
+      ? " · showing "+(start+1).toLocaleString()+"–"+Math.min(start+TBL_PAGE,sorted.length).toLocaleString()
+      : "");
+  head.appendChild(count);
+  const acts=el("div","row");
+  if(pages>1){
+    const prev=el("button",null,"‹ Prev"); prev.disabled=state.tbl.page===0;
+    prev.onclick=()=>{ state.tbl.page--; renderTables(); };
+    const lbl=el("span","muted","Page "+(state.tbl.page+1)+" of "+pages.toLocaleString());
+    lbl.style.padding="0 4px";
+    const next=el("button",null,"Next ›"); next.disabled=state.tbl.page>=pages-1;
+    next.onclick=()=>{ state.tbl.page++; renderTables(); };
+    acts.append(prev,lbl,next);
+  }
+  const dl=el("button",null,"Download CSV");
+  dl.onclick=()=>downloadTablesCSV(src,cols,sorted);
+  acts.appendChild(dl);
+  head.appendChild(acts);
+  card.appendChild(head);
+
+  if(!sorted.length){
+    const none=el("div","muted",
+      "No rows match. Widen the date range, add a subsystem, or clear the search box.");
+    none.style.padding="18px 2px";
+    card.appendChild(none);
+    return;
+  }
+
+  const scroll=el("div","scroll");
+  const t=el("table","data");
+  const thead=el("thead"); const hr=el("tr");
+  cols.forEach((c,i)=>{
+    const th=el("th");
+    const st=state.tbl.sort;
+    th.textContent=c.label+(st&&st.col===i?(st.dir==="asc"?" ▲":" ▼"):"");
+    th.classList.add("sortable");
+    th.onclick=()=>{
+      const cur=state.tbl.sort;
+      state.tbl.sort = (cur&&cur.col===i) ? {col:i, dir:cur.dir==="desc"?"asc":"desc"}
+                                          : {col:i, dir:"desc"};
+      state.tbl.page=0; renderTables();
+    };
+    hr.appendChild(th);
+  });
+  thead.appendChild(hr); t.appendChild(thead);
+  const tb=el("tbody");
+  page.forEach(r=>{
+    const tr=el("tr");
+    cols.forEach((c,i)=>{
+      const td=el("td");
+      td.textContent = c.num ? fmtNum(r[i], c.dec==null?1:c.dec) : (r[i]||"");
+      tr.appendChild(td);
+    });
+    tb.appendChild(tr);
+  });
+  t.appendChild(tb); scroll.appendChild(t); card.appendChild(scroll);
+}
+
+function renderTablesControls(src){
+  const card=document.getElementById("tablesCard");
+  card.innerHTML="";
+
+  // source picker
+  const pickWrap=el("div","ctl");
+  pickWrap.appendChild(el("label",null,"Data source"));
+  const pills=el("div","row"); pills.style.flexWrap="wrap";
+  TABLE_SOURCES.forEach(s=>{
+    const b=el("button",null,s.label);
+    b.setAttribute("aria-pressed",String(s.id===state.tbl.src));
+    b.onclick=()=>{ state.tbl.src=s.id; state.tbl.page=0; state.tbl.sort=null;
+                    state.tbl.q=""; renderTables(); };
+    pills.appendChild(b);
+  });
+  pickWrap.appendChild(pills);
+  card.appendChild(pickWrap);
+
+  const note=el("div","muted");
+  note.style.cssText="margin:10px 0 4px;line-height:1.6;font-size:11.5px";
+  note.textContent=src.note+" ";
+  const a=document.createElement("a");
+  a.href=ONS_DS+src.slug; a.target="_blank"; a.rel="noopener";
+  a.textContent="Open this dataset at dados.ons.org.br →";
+  note.appendChild(a);
+  card.appendChild(note);
+
+  const ctrls=el("div","controls");
+  if(!src.static){
+    const mk=(id,label,val)=>{
+      const c=el("div","ctl"); c.appendChild(el("label",null,label));
+      const inp=document.createElement("input");
+      inp.type="date"; inp.value=val;
+      inp.min=DATA.dates[0]; inp.max=DATA.dates[DATA.dates.length-1];
+      inp.onchange=()=>{ state.tbl[id]=inp.value||state.tbl[id];
+                         state.tbl.page=0; renderTables(); };
+      c.appendChild(inp); return c;
+    };
+    const presets=el("div","ctl");
+    presets.appendChild(el("label",null,"Date range"));
+    const prow=el("div","row");
+    const last=DATA.dates[DATA.dates.length-1];
+    const back=n=>{ const d=new Date(last+"T00:00:00Z");
+                    d.setUTCDate(d.getUTCDate()-n);
+                    const s=d.toISOString().slice(0,10);
+                    return s<DATA.dates[0]?DATA.dates[0]:s; };
+    [["7D",back(6)],["30D",back(29)],["90D",back(89)],["1Y",back(364)],
+     ["Max",DATA.dates[0]]].forEach(([nm,from])=>{
+      const b=el("button",null,nm);
+      b.onclick=()=>{ state.tbl.from=from; state.tbl.to=last; state.tbl.page=0;
+                      renderTables(); };
+      prow.appendChild(b);
+    });
+    presets.appendChild(prow);
+    ctrls.append(presets, mk("from","From",state.tbl.from), mk("to","To",state.tbl.to));
+  }
+
+  const subCtl=el("div","ctl");
+  subCtl.appendChild(el("label",null,"Subsystems"));
+  const srow=el("div","row");
+  DATA.subsystems.forEach(s=>{
+    // SIN rows only exist for subsystem-level series (they are derived by
+    // summing/averaging the four subsystems), so offering the toggle on an
+    // entity-level source would just be a button that filters everything out.
+    if(s==="SIN" && (src.kind||src.static)) return;
+    const b=el("button",null,s);
+    b.setAttribute("aria-pressed",String(state.tbl.subs.has(s)));
+    b.onclick=()=>{
+      if(state.tbl.subs.has(s)) state.tbl.subs.delete(s); else state.tbl.subs.add(s);
+      state.tbl.page=0; renderTables();
+    };
+    srow.appendChild(b);
+  });
+  subCtl.appendChild(srow);
+  ctrls.appendChild(subCtl);
+
+  if(src.kind || src.static){
+    const qc=el("div","ctl");
+    qc.appendChild(el("label",null,"Search "+tblEntityLabel(src.kind).toLowerCase()));
+    const inp=document.createElement("input");
+    inp.type="search"; inp.value=state.tbl.q; inp.placeholder="name contains…";
+    inp.oninput=()=>{ state.tbl.q=inp.value; state.tbl.page=0; renderTables(); };
+    qc.appendChild(inp);
+    ctrls.appendChild(qc);
+  }
+  card.appendChild(ctrls);
+}
+
+function downloadTablesCSV(src, cols, rows){
+  const esc=v=>{
+    if(v==null) return "";
+    const s=String(v);
+    return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s;
+  };
+  let out=cols.map(c=>esc(c.label)).join(",")+"\n";
+  rows.forEach(r=>{
+    out+=cols.map((c,i)=>{
+      const v=r[i];
+      if(v==null) return "";
+      return c.num ? Number(v).toFixed(c.dec==null?1:c.dec) : esc(v);
+    }).join(",")+"\n";
+  });
+  const stamp = src.static ? "snapshot" : state.tbl.from+"_"+state.tbl.to;
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([out],{type:"text/csv"}));
+  a.download="ons_"+src.id+"_"+stamp+".csv";
+  a.click(); URL.revokeObjectURL(a.href);
+}
+
+function render(){
+  // The Data Tables view replaces the whole chart apparatus rather than
+  // adding to it: no KPI tiles, no series picker, no chart panels, and the
+  // per-view "Download CSV" button (which exports the plotted series) has
+  // nothing to export, so the tables card carries its own instead.
+  const isTables = state.view==="tables";
+  ["controlsCard","pickCard","charts","kpiTiles","resSummary","tableCard"]
+    .forEach(id=>{ const e=document.getElementById(id); if(e) e.hidden=isTables; });
+  ["tablesCard","tablesTableCard"].forEach(id=>{
+    const e=document.getElementById(id); if(e) e.hidden=!isTables; });
+  const csvBtn=document.getElementById("csvBtn");
+  if(csvBtn) csvBtn.hidden=isTables;
+  if(isTables){ renderTables(); return; }
+  renderKpis(); renderCharts(); renderTable();
+}
 
 /* ---------- boot ----------------------------------------------------------- */
 async function unpack(){
@@ -2500,6 +2929,11 @@ async function boot(){
   const last=DATA.dates[DATA.dates.length-1];
   state.to=last;
   state.from=DATA.dates[Math.max(0,DATA.dates.length-366)];
+  // Data Tables opens on the last 30 days. A full-history default would be
+  // tens of thousands of rows for the plant-level sources before the visitor
+  // has narrowed anything, and the date presets are right there.
+  state.tbl.to=last;
+  state.tbl.from=DATA.dates[Math.max(0,DATA.dates.length-30)];
 
   let subtitleText = "Last refreshed " + DATA.generated;
   try {
@@ -2517,10 +2951,19 @@ async function boot(){
     'Dados Abertos</a> (CC-BY). Balanço de Energia nos Subsistemas · Geração por '+
     'Usina em Base Horária · Geração Térmica por Motivo de Despacho (sheet 09) · '+
     'ENA/EAR Diário por Subsistema · EAR Diário por REE · Dados Hidráulicos por '+
-    'Reservatório (sheets 23–26) · CMO Semi-Horário · Capacidade Instalada de '+
+    'Reservatório (sheets 23–26) · CMO Semi-Horário · CVU das Usinas Térmicas · '+
+    'Capacidade Instalada de '+
     'Geração. Hourly and semi-hourly sources are averaged to '+
     'daily means. SIN rows are summed for absolute series; EAR % and ENA %MLT are '+
     'rebuilt from their components, CMO is an unweighted subsystem mean. '+
+    'CVU is published weekly per plant (one figure per PMO operative week) and is '+
+    'held flat across that week’s days rather than interpolated; the subsystem '+
+    'figures are the cheapest, median and priciest CVU among gas-fired plants with '+
+    'a CVU above zero, since a CVU of exactly zero marks an inflexible/must-run '+
+    'unit rather than the cheapest dispatchable megawatt. CVU is joined to the '+
+    'dispatch data by ONS’s planning-model plant code (cod_usinaplanejamento), not '+
+    'by plant name — the two datasets name plants differently. SIN CVU is an exact '+
+    'min/max across subsystems; the SIN median is a subsystem mean, as CMO is. '+
     'Net interchange is positive when the subsystem is a net exporter, matching the '+
     'bulletin. ONS revises recent days after publication.<br>'+
     'Capacity, utilization &amp; gas consumption: installed capacity is joined from '+
