@@ -23,8 +23,21 @@ FONT_PATH = Path(__file__).parent / "fonts" / "Degular.ttf"
 FAVICON_PATH = Path(__file__).parent / "favicon.png"
 
 SUBSYSTEM_ORDER = ["SIN", "SE", "S", "NE", "N"]
+
+# What each subsystem code is *shown* as where the bare code appears (toggle
+# buttons, table cells, exports). ONS's own name for the national total is SIN
+# (Sistema Interligado Nacional); "Total" is what reads clearly to someone who
+# doesn't already know that, so the display is relabelled while every key,
+# series id and lookup in the payload stays on the real code.
+SUBSYSTEM_SHORT = {
+    "SIN": "Total",
+    "SE": "SE",
+    "S": "S",
+    "NE": "NE",
+    "N": "N",
+}
 SUBSYSTEM_LABELS = {
-    "SIN": "SIN (national)",
+    "SIN": "Total (national)",
     "SE": "Southeast/Midwest",
     "S": "South",
     "NE": "Northeast",
@@ -328,6 +341,7 @@ def build_payload(df: pd.DataFrame, ent: pd.DataFrame) -> dict:
         "seriesOrder": list(SERIES_META),
         "subsystems": SUBSYSTEM_ORDER,
         "subsystemLabels": SUBSYSTEM_LABELS,
+        "subsystemShort": SUBSYSTEM_SHORT,
         "unitPanels": [{"unit": u, "title": t} for u, t in UNIT_PANELS],
         "paletteLight": PALETTE_LIGHT,
         "paletteDark": PALETTE_DARK,
@@ -386,7 +400,15 @@ __FONT_FACE__
   color-scheme: light;
   --surface-1:#fcfcfb; --plane:#f4f4f1; --text-1:#0b0b0b; --text-2:#52514e;
   --muted:#898781; --grid:#e1e0d9; --axis:#c3c2b7; --ring:rgba(11,11,11,.10);
-  --accent:#03183D; --wash:rgba(3,24,61,.08);
+  /* Brazilian flag palette. --brz-* are the flag's own values, used for
+     fills and borders where the surface behind them is dark enough. --ok-ink
+     and --warn-ink are the text-safe counterparts: #009C3B reads at about
+     3:1 on this near-white background and #FFDF00 at under 2:1, neither of
+     which is legible at 11-12px, so small text and icons use the darkened
+     forms while the flag values stay for solid areas. */
+  --brz-green:#009C3B; --brz-yellow:#FFDF00; --brz-blue:#002776;
+  --ok-ink:#00752c; --warn-ink:#8a6a00;
+  --accent:#002776; --wash:rgba(0,39,118,.08);
 }
 /* Defaults to Light Mode regardless of the OS/browser color-scheme
    preference -- dark only applies when the visitor explicitly toggles it
@@ -395,7 +417,13 @@ __FONT_FACE__
   color-scheme: dark;
   --surface-1:#1a1a19; --plane:#0d0d0d; --text-1:#fff; --text-2:#c3c2b7;
   --muted:#898781; --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10);
-  --accent:#4a78c2; --wash:rgba(74,120,194,.16);
+  /* The flag blue itself is too dark to read as a link or a button label
+     against a near-black background, so dark mode lightens it while keeping
+     the same hue. Yellow needs no adjustment here -- it is the one flag
+     color that works better on dark than on light. */
+  --brz-green:#009C3B; --brz-yellow:#FFDF00; --brz-blue:#002776;
+  --ok-ink:#22b757; --warn-ink:#FFDF00;
+  --accent:#3f74d9; --wash:rgba(63,116,217,.16);
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--plane);color:var(--text-1);
@@ -405,6 +433,15 @@ header{display:flex;flex-wrap:wrap;gap:12px;align-items:baseline;
   justify-content:space-between;margin-bottom:14px}
 h1{font-size:25px;margin:0;letter-spacing:-.01em}
 .sub{color:var(--text-2);font-size:13px}
+/* Green/yellow/blue band under the header -- the one place the flag appears
+   as itself rather than as an accent on something else. Proportions echo the
+   flag's own (green field, yellow lozenge, blue disc) rather than being three
+   equal thirds. The blue segment tracks --accent rather than --brz-blue so it
+   picks up dark mode's lightened blue; the flag value itself is nearly
+   invisible against a near-black background. */
+.flagbar{height:4px;border-radius:2px;margin:0 0 12px;
+  background:linear-gradient(90deg,
+    var(--brz-green) 0 46%, var(--brz-yellow) 46% 73%, var(--accent) 73% 100%)}
 .sources{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0 0 14px}
 .sources-label{font-size:11px;text-transform:uppercase;letter-spacing:.06em;
   color:var(--muted);font-weight:600;margin-right:2px}
@@ -416,6 +453,13 @@ h1{font-size:25px;margin:0;letter-spacing:-.01em}
 .navlink{font-size:11.5px;color:var(--accent);text-decoration:none;font-weight:600;
   border:1px solid var(--accent);border-radius:999px;padding:3px 10px;white-space:nowrap}
 .navlink:hover{background:var(--accent);color:#fff}
+/* "Refresh data" triggers a real rebuild, so it reads as an action rather
+   than another navigation pill -- green sets it apart from the blue-accented
+   links beside it. */
+#refreshBtn{color:var(--ok-ink);border-color:var(--brz-green);font-weight:600}
+#refreshBtn:hover:not(:disabled){background:var(--brz-green);color:#fff;
+  border-color:var(--brz-green)}
+#refreshBtn:disabled{opacity:.55}
 .iconBtn{display:inline-flex;align-items:center;justify-content:center;
   padding:5px 9px;line-height:0}
 .iconBtn svg{width:16px;height:16px;display:block}
@@ -427,8 +471,12 @@ h1{font-size:25px;margin:0;letter-spacing:-.01em}
 .tabs button{border:0;border-bottom:2px solid transparent;background:none;
   border-radius:0;padding:9px 14px;color:var(--text-2);font-weight:600;font-size:13.5px}
 .tabs button[aria-pressed=true]{color:#fff;background:var(--accent);
-  border-bottom-color:var(--accent);border-radius:6px 6px 0 0}
+  border-bottom-color:var(--accent);border-radius:6px 6px 0 0;
+  /* yellow on blue, the flag's own pairing, marking the active tab with
+     something other than the fill alone */
+  box-shadow:inset 0 -3px 0 var(--brz-yellow)}
 .tabs button:hover{background:var(--wash)}
+.tabs button[aria-pressed=true]:hover{background:var(--accent)}
 .controls{display:flex;flex-wrap:wrap;gap:18px;align-items:flex-end}
 .ctl{display:flex;flex-direction:column;gap:6px}
 .ctl > label{font-size:11px;text-transform:uppercase;letter-spacing:.06em;
@@ -464,7 +512,10 @@ button[aria-pressed=true]{background:var(--accent);border-color:var(--accent);co
 .colFilterBtn{border:0;background:none;padding:0;margin:0;font-size:10px;
   line-height:1;color:var(--muted);cursor:pointer}
 .colFilterBtn:hover{color:var(--text-1);background:none}
-.colFilterBtn.active{color:var(--accent);font-weight:700}
+/* Amber rather than the accent: an active column filter means what you are
+   looking at is a subset, which is worth flagging differently from the blue
+   used for ordinary selected/active chrome. */
+.colFilterBtn.active{color:var(--warn-ink);font-weight:700}
 .colFilterPop{position:fixed;background:var(--surface-1);border:1px solid var(--ring);
   border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.16);padding:8px;font-size:12px;
   display:flex;flex-direction:column;gap:6px;z-index:60;min-width:180px}
@@ -540,6 +591,8 @@ table.data thead th.sortable:hover{background:var(--wash)}
     <button id="themeBtn" class="iconBtn" title="Toggle light/dark" aria-label="Toggle light/dark"></button>
   </div>
 </header>
+
+<div class="flagbar" aria-hidden="true"></div>
 
 <div class="sources" id="sources">
   <span class="sources-label">Data sources</span>
@@ -720,6 +773,12 @@ function paintThemeIcon(){
 
 /* ---------- series keys: "<metric>|<subsystem>|<entity>" -------------------- */
 const skey = (m,s,e="") => m+"|"+s+"|"+e;
+
+/* Display form of a bare subsystem code. Only ever used for text a person
+   reads -- toggle buttons, table cells, export columns. Every key, lookup and
+   series id keeps the real ONS code ("SIN"), so nothing downstream shifts
+   because the label did. */
+const subShort = s => (DATA.subsystemShort && DATA.subsystemShort[s]) || s;
 const metricOf = k => k.split("|")[0];
 const unitOf = k => DATA.seriesMeta[metricOf(k)].unit;
 let AMBIG = null;
@@ -735,8 +794,9 @@ function ambiguous(name){
 }
 function labelOf(k){
   const [m,s,e]=k.split("|");
-  if(!e) return DATA.seriesMeta[m].label + " · " + s;
-  return DATA.seriesMeta[m].label + " · " + e + (ambiguous(e) ? " ("+s+")" : "");
+  if(!e) return DATA.seriesMeta[m].label + " · " + subShort(s);
+  return DATA.seriesMeta[m].label + " · " + e
+       + (ambiguous(e) ? " ("+subShort(s)+")" : "");
 }
 let ENT_BY_KEY=null;
 function entityOf(sub,ent){
@@ -868,6 +928,20 @@ function cellSortValue(td){
   if(cleaned!=="" && !isNaN(cleaned)) return parseFloat(cleaned);
   return t.toLowerCase();
 }
+// Stamp each row with the order it was built in, so "no sort" is a real,
+// restorable state rather than "whatever the last sort left behind". These
+// tables are torn down and rebuilt on every render, so a fresh build gets
+// fresh indices -- the natural order is always the current natural order.
+function stampNaturalOrder(table){
+  const tbody=table.tBodies[0]; if(!tbody) return;
+  [...tbody.rows].forEach((r,i)=>{ if(r.dataset.natOrder===undefined) r.dataset.natOrder=i; });
+}
+function restoreNaturalOrder(table){
+  const tbody=table.tBodies[0]; if(!tbody) return;
+  [...tbody.rows]
+    .sort((a,b)=>Number(a.dataset.natOrder)-Number(b.dataset.natOrder))
+    .forEach(r=>tbody.appendChild(r));
+}
 function sortTableRows(table,col,dir){
   const tbody=table.tBodies[0]; if(!tbody) return;
   const rows=[...tbody.rows];
@@ -919,14 +993,24 @@ function makeSortable(table,id){
     if(!th.textContent) return;               // blank header: not sortable
     th.classList.add("sortable");
     th.onclick=()=>{
+      // Three-state cycle on one column: highest->lowest, lowest->highest,
+      // then no sort at all (back to the order the table was built in).
+      // Clicking a different column always starts that column fresh at
+      // highest->lowest.
       const cur=sortState[id];
-      sortState[id] = (cur && cur.col===i)
-        ? {col:i, dir: cur.dir==="desc"?"asc":"desc"}
-        : {col:i, dir:"desc"};
-      sortTableRows(table, sortState[id].col, sortState[id].dir);
+      if(cur && cur.col===i && cur.dir==="asc"){
+        delete sortState[id];
+        restoreNaturalOrder(table);
+      } else {
+        sortState[id] = (cur && cur.col===i)
+          ? {col:i, dir:"asc"}
+          : {col:i, dir:"desc"};
+        sortTableRows(table, sortState[id].col, sortState[id].dir);
+      }
       paintSortIndicators(table, id);
     };
   });
+  stampNaturalOrder(table);
   const st=sortState[id];
   if(st) sortTableRows(table, st.col, st.dir);
   paintSortIndicators(table, id);
@@ -968,7 +1052,7 @@ function buildSubs(){
   const host=document.getElementById("subs"); host.innerHTML="";
   DATA.subsystems.forEach(s=>{
     if(view().kind && s==="SIN") return;          // plants/reservoirs have no SIN
-    const b=el("button",null,s); b.title=DATA.subsystemLabels[s];
+    const b=el("button",null,subShort(s)); b.title=DATA.subsystemLabels[s];
     b.setAttribute("aria-pressed",String(state.subs.has(s)));
     b.onclick=()=>{
       if(state.subs.has(s)) state.subs.delete(s); else state.subs.add(s);
@@ -1821,7 +1905,7 @@ function buildAllDataSheets(){
         const arr=DATA.series[skey(m,sub)];
         return arr ? arr[i] : null;
       });
-      if(vals.some(v=>v!=null)) subRows.push([d,sub].concat(vals));
+      if(vals.some(v=>v!=null)) subRows.push([d,subShort(sub)].concat(vals));
     });
   });
   sheets.push({name:"Subsystems", rows:subRows});
@@ -1848,7 +1932,7 @@ function buildAllDataSheets(){
       const desvio=(p==null||Math.abs(p)<1e-6)?null:r2(100*(v-p)/p);
       const util=(cap==null||cap<=0)?null:r2(100*v/cap);
       const gas=hr==null?null:r2(v*24*1000*hr/9400);
-      plantRows.push([d,name,sub,ent.group||"",cap,p,v,desvio,util,gas]);
+      plantRows.push([d,name,subShort(sub),ent.group||"",cap,p,v,desvio,util,gas]);
     });
   });
   sheets.push({name:"Thermal Plants", rows:plantRows});
@@ -1864,7 +1948,7 @@ function buildAllDataSheets(){
     dates.forEach((d,i)=>{
       const vol=volArr?volArr[i]:null, lvl=lvlArr?lvlArr[i]:null;
       if(vol==null && lvl==null) return;
-      resRows.push([d,name,sub,ent.group||"",vol,lvl]);
+      resRows.push([d,name,subShort(sub),ent.group||"",vol,lvl]);
     });
   });
   sheets.push({name:"Reservoirs", rows:resRows});
@@ -1881,7 +1965,7 @@ function buildAllDataSheets(){
     dates.forEach((d,i)=>{
       const mw=mwArr[i];
       if(mw==null) return;
-      reeRows.push([d,name,sub,mw,maxArr?maxArr[i]:null,pctArr?pctArr[i]:null]);
+      reeRows.push([d,name,subShort(sub),mw,maxArr?maxArr[i]:null,pctArr?pctArr[i]:null]);
     });
   });
   sheets.push({name:"EAR by REE", rows:reeRows});
@@ -2034,7 +2118,7 @@ function renderKpis(){
     "runs earlier in the day and can miss that update, so this tab can trail a day behind "+
     "Thermal Plants, which draws on a bulletin ONS updates throughout the day."));
 
-  host.appendChild(kpiTile("SIN load", fmtNum(loadV,0), "MWmed",
+  host.appendChild(kpiTile("Total load", fmtNum(loadV,0), "MWmed",
     "national balance · "+asOfDate));
 
   if(gasV!=null){
@@ -2075,7 +2159,7 @@ function renderKpis(){
     const mix=fuelMix(s);
     if(!mix || !mix.prod || !mix.parts.length) return;
     const wide=el("div","tile"); wide.style.gridColumn="1 / -1";
-    const label=s==="SIN" ? "SIN (national)" : (DATA.subsystemLabels[s]||s);
+    const label=DATA.subsystemLabels[s]||s;
     let h='<div class="nm">Generation by fuel — '+label+' · '+mix.date+'</div>';
     h+='<div class="mix-bar">'+mix.parts.map(([nm,v,c])=>
       '<div style="flex:'+Math.max(v,0)+';background:'+c+'" title="'+nm+' '+
@@ -2137,7 +2221,7 @@ function renderReservoirKpis(host, extra){
   }
   const sin=earRow("SIN");
   if(sin && sin.pct!=null){
-    host.appendChild(kpiTile("SIN reservoirs (EAR)", fmtNum(sin.pct,1), "%",
+    host.appendChild(kpiTile("Total reservoirs (EAR)", fmtNum(sin.pct,1), "%",
       "national stored energy"+(sin.chg==null?"":" · "+(sin.chg>=0?"+":"")+
         sin.chg.toFixed(1)+"pt vs 30d ago"), mixColor("hydro")));
   }
@@ -2228,7 +2312,7 @@ function renderReservoirRegionTable(host){
     '<th>Stored / capacity (MWmês)</th><th>30d change</th>'+
     '<th>Inflow, % of long-term avg</th></tr></thead><tbody>';
   rows.forEach(r=>{
-    const label=r.sub==="SIN" ? "SIN (national)" : (DATA.subsystemLabels[r.sub]||r.sub);
+    const label=DATA.subsystemLabels[r.sub]||r.sub;
     const w=Math.max(0,Math.min(100,r.pct));
     h+='<tr><td class="l">'+label+'</td>'+
       '<td class="l"><div class="cap-bar" title="'+fmtNum(r.pct,1)+'% full">'+
@@ -2492,6 +2576,28 @@ const TABLE_SOURCES = [
         "each PMO operative week. These are the cheapest, median and priciest CVU "+
         "among gas-fired plants with a CVU above zero — a CVU of exactly zero is "+
         "an inflexible/must-run unit, not a cheap dispatchable megawatt."},
+  // Two ONS datasets side by side. CMO is the system marginal price -- what
+  // the last megawatt dispatched cost -- and CVU is what each thermal plant
+  // charges to run, so the gap between them is the whole question a gas
+  // trader is asking: a plant whose CVU sits below CMO is in the money. Both
+  // are subsystem-level R$/MWh on the same daily grid, so they line up
+  // directly with no reshaping.
+  {id:"prices", label:"CMO vs CVU (compared)", slug:"cmo-semi-horario", kind:"",
+   links:[["CMO Semi-Hor\u00e1rio","cmo-semi-horario"],
+          ["CVU das Usinas T\u00e9rmicas","cvu-usitermica"]],
+   metrics:["cmo","cvu_gas_min","cvu_gas_med","cvu_gas_max"],
+   derived:[
+     {label:"CMO \u2212 cheapest CVU (R$/MWh)", dec:2,
+      fn:v=>(v[0]==null||v[1]==null)?null:v[0]-v[1]},
+     {label:"CMO \u2212 median CVU (R$/MWh)", dec:2,
+      fn:v=>(v[0]==null||v[2]==null)?null:v[0]-v[2]}],
+   note:"The marginal cost of the system (CMO) next to what gas plants charge "+
+        "to run (CVU), on the same daily grid. The two spread columns are "+
+        "CMO minus that CVU: positive means the plant is in the money at that "+
+        "day\u2019s marginal price, negative means it is out of merit. CMO is a "+
+        "daily mean of ONS\u2019s 30-minute settlement prices; CVU is published "+
+        "weekly per plant and held flat across the week, so a spread moves on "+
+        "CMO day to day and steps on CVU week to week."},
   {id:"capacidade", label:"Installed capacity", slug:"capacidade-geracao",
    kind:"plant", static:true,
    note:"Capacidade Instalada de Geração — a live snapshot with no history, joined "+
@@ -2521,6 +2627,14 @@ function tblColumns(src){
     cols.push({key:m, label:meta.label+" ("+meta.unit+")", num:true,
                dec:(meta.unit==="%"||meta.unit==="R$/MWh"||meta.unit==="m")?2:1});
   });
+  // Computed columns (currently the CMO/CVU spreads). They have no series of
+  // their own -- each is a function of that row's metric values, evaluated
+  // after those are read -- so they carry a `derived` marker that keeps them
+  // out of the series-fetching path in tblRows.
+  (src.derived||[]).forEach((d,j)=>{
+    cols.push({key:"__derived"+j, label:d.label, num:true,
+               dec:d.dec==null?2:d.dec, derived:d});
+  });
   return cols;
 }
 function tblEntityLabel(kind){
@@ -2547,6 +2661,7 @@ function tblRows(src){
       if(!state.tbl.subs.has(e.subsystem)) return;
       rows.push(cols.map(c=>{
         if(c.key==="rolled_up") return e.rolled_up===true||e.rolled_up==="True" ? "yes" : "";
+        if(c.key==="subsystem") return subShort(e.subsystem);
         const v=e[c.key];
         if(c.num) return (v===""||v==null) ? null : Number(v);
         return v==null ? "" : String(v);
@@ -2555,7 +2670,9 @@ function tblRows(src){
     return {cols, rows};
   }
   const [i0,i1]=tblBounds();
-  const metricCols=cols.filter(c=>c.key!=="date"&&c.key!=="subsystem"&&c.key!=="entity");
+  const metricCols=cols.filter(c=>!c.derived
+    && c.key!=="date" && c.key!=="subsystem" && c.key!=="entity");
+  const derivedCols=cols.filter(c=>c.derived);
   const targets=[];
   if(src.kind){
     tblEntities(src.kind).forEach(e=>{
@@ -2594,9 +2711,9 @@ function tblRows(src){
       for(let i=i0;i<=i1;i++){
         const vals=vecs.map(v=>v?(v[i]==null?null:v[i]):null);
         if(vals.every(v=>v==null)) continue;  // no data that day: skip the row
-        const row=[DATA.dates[i], t.sub];
+        const row=[DATA.dates[i], subShort(t.sub)];
         if(src.kind) row.push(t.ent);
-        rows.push(row.concat(vals));
+        rows.push(row.concat(vals, derivedCols.map(c=>c.derived.fn(vals))));
       }
     });
   } finally { state.smooth=prevSmooth; }
@@ -2674,9 +2791,13 @@ function renderTables(){
     th.textContent=c.label+(st&&st.col===i?(st.dir==="asc"?" ▲":" ▼"):"");
     th.classList.add("sortable");
     th.onclick=()=>{
+      // Same three-state cycle as the shared tables: desc, asc, unsorted.
+      // "Unsorted" here means tblRows' own build order, which tblSortRows
+      // passes through untouched when state.tbl.sort is null.
       const cur=state.tbl.sort;
-      state.tbl.sort = (cur&&cur.col===i) ? {col:i, dir:cur.dir==="desc"?"asc":"desc"}
-                                          : {col:i, dir:"desc"};
+      if(cur && cur.col===i && cur.dir==="asc") state.tbl.sort=null;
+      else state.tbl.sort = (cur&&cur.col===i) ? {col:i, dir:"asc"}
+                                               : {col:i, dir:"desc"};
       state.tbl.page=0; renderTables();
     };
     hr.appendChild(th);
@@ -2716,10 +2837,17 @@ function renderTablesControls(src){
   const note=el("div","muted");
   note.style.cssText="margin:10px 0 4px;line-height:1.6;font-size:11.5px";
   note.textContent=src.note+" ";
-  const a=document.createElement("a");
-  a.href=ONS_DS+src.slug; a.target="_blank"; a.rel="noopener";
-  a.textContent="Open this dataset at dados.ons.org.br →";
-  note.appendChild(a);
+  // A source drawing on more than one ONS dataset links to each of them by
+  // name; the single-dataset case keeps the plain "open this dataset" wording.
+  const links = src.links || [[null, src.slug]];
+  links.forEach(([label,slug],i)=>{
+    if(i) note.appendChild(document.createTextNode(" · "));
+    const a=document.createElement("a");
+    a.href=ONS_DS+slug; a.target="_blank"; a.rel="noopener";
+    a.textContent = label ? (label+" at dados.ons.org.br →")
+                          : "Open this dataset at dados.ons.org.br →";
+    note.appendChild(a);
+  });
   card.appendChild(note);
 
   const ctrls=el("div","controls");
@@ -2760,7 +2888,7 @@ function renderTablesControls(src){
     // summing/averaging the four subsystems), so offering the toggle on an
     // entity-level source would just be a button that filters everything out.
     if(s==="SIN" && (src.kind||src.static)) return;
-    const b=el("button",null,s);
+    const b=el("button",null,subShort(s));
     b.setAttribute("aria-pressed",String(state.tbl.subs.has(s)));
     b.onclick=()=>{
       if(state.tbl.subs.has(s)) state.tbl.subs.delete(s); else state.tbl.subs.add(s);
@@ -2843,7 +2971,8 @@ function injectVirtualTotals(){
   (DATA.subsystems||[]).forEach(sub=>{
     DATA.entities.push({
       kind: "plant",
-      entity: "Total — " + (DATA.subsystemLabels[sub] || sub),
+      entity: "Total — " + (sub === "SIN" ? "National"
+                            : (DATA.subsystemLabels[sub] || sub)),
       subsystem: sub,
       group: "Gas",
       isTotal: true,
@@ -2954,7 +3083,8 @@ async function boot(){
     'Reservatório (sheets 23–26) · CMO Semi-Horário · CVU das Usinas Térmicas · '+
     'Capacidade Instalada de '+
     'Geração. Hourly and semi-hourly sources are averaged to '+
-    'daily means. SIN rows are summed for absolute series; EAR % and ENA %MLT are '+
+    'daily means. The national Total row is summed for absolute series; EAR % and '+
+    'ENA %MLT are '+
     'rebuilt from their components, CMO is an unweighted subsystem mean. '+
     'CVU is published weekly per plant (one figure per PMO operative week) and is '+
     'held flat across that week’s days rather than interpolated; the subsystem '+
@@ -2963,7 +3093,8 @@ async function boot(){
     'unit rather than the cheapest dispatchable megawatt. CVU is joined to the '+
     'dispatch data by ONS’s planning-model plant code (cod_usinaplanejamento), not '+
     'by plant name — the two datasets name plants differently. SIN CVU is an exact '+
-    'min/max across subsystems; the SIN median is a subsystem mean, as CMO is. '+
+    'min/max across subsystems; the national Total median is a subsystem mean, as '+
+    'CMO is. '+
     'Net interchange is positive when the subsystem is a net exporter, matching the '+
     'bulletin. ONS revises recent days after publication.<br>'+
     'Capacity, utilization &amp; gas consumption: installed capacity is joined from '+
@@ -3035,8 +3166,16 @@ async function boot(){
   // 13th pass) so the fleet-wide totals chart by default; individual plants
   // still start unchecked, and picking a Region/Fuel/Search filter still
   // replaces the selection with that filter's top 5 (onFilterChange), same
-  // as before. Sorted by Name by default rather than left in insertion order.
-  sortState["entlist-plant"]={col:1,dir:"asc"};
+  // as before.
+  //
+  // No default sortState is seeded here any more. entityRows() already
+  // returns its rows selected-first then alphabetically by name, which is
+  // both the order this seed was producing at boot (nothing is selected
+  // among the real plants at that point) and a more useful one once the
+  // visitor has picked some. Seeding an ascending sort on top of it made the
+  // first click on the Name header *clear* that sort rather than reverse it
+  // -- correct per the three-state cycle, but it looked like a dead click,
+  // since clearing landed on the same alphabetical order it started from.
   DATA.entities.filter(e=>e.kind==="plant" && e.isTotal).forEach(e=>{
     [...state.metrics.plants].map(m=>skey(m,e.subsystem,e.entity)).filter(exists)
       .forEach(k=>{ claimSlot(k,"plants"); state.picked.plants.push(k); });
